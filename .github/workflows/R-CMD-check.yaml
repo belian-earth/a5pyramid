@@ -1,0 +1,83 @@
+# Workflow derived from https://github.com/r-lib/actions/tree/v2/examples
+# Need help debugging build failures? Start at https://github.com/r-lib/actions#where-to-find-help
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+name: R-CMD-check.yaml
+
+permissions: read-all
+
+jobs:
+  R-CMD-check:
+    runs-on: ${{ matrix.config.os }}
+
+    name: ${{ matrix.config.os }} (${{ matrix.config.r }})
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - {os: macos-latest,   r: 'release'}
+          - {os: windows-latest, r: 'release'}
+          # no arrow binary for Windows ARM64, nor a5view, which imports it;
+          # the tests that use them skip
+          - {os: windows-11-arm, r: 'release', extra: 'arrow=?ignore, a5view=?ignore'}
+          - {os: ubuntu-latest,   r: 'devel', http-user-agent: 'release'}
+          - {os: ubuntu-latest,   r: 'release'}
+          - {os: ubuntu-latest,   r: 'oldrel-1'}
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Add the Windows ARM64 Rust target
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        run: |
+          rustup target add aarch64-pc-windows-gnullvm
+          echo "_R_CHECK_FORCE_SUGGESTS_=false" >> $GITHUB_ENV
+
+      - uses: r-lib/actions/setup-pandoc@v2
+
+      # the hyparquet tests read files under Node
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.config.r }}
+          http-user-agent: ${{ matrix.config.http-user-agent }}
+
+      # Match the macOS deployment target to the installed R build so
+      # neither direction of ld's version-skew warning fires (rcmdcheck
+      # escalates warnings to errors via error_on = "warning"). A hardcoded
+      # value rots when the CRAN R build moves (11.0 until R 4.4, 13.0 from
+      # R 4.5 arm64), so read it off libR.dylib instead.
+      - name: Match macOS deployment target to R
+        if: runner.os == 'macOS'
+        run: |
+          TARGET=$(otool -l "$(R RHOME)/lib/libR.dylib" | awk '/minos/ {print $2; exit}')
+          if [ -z "$TARGET" ]; then
+            TARGET=$(otool -l "$(R RHOME)/lib/libR.dylib" | awk '/LC_VERSION_MIN_MACOSX/{f=1} f && /version/ {print $2; exit}')
+          fi
+          if [ -n "$TARGET" ]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=$TARGET" >> "$GITHUB_ENV"
+          fi
+          echo "deployment target from libR.dylib: ${TARGET:-<not found, leaving unset>}"
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: |
+            any::rcmdcheck
+            ${{ matrix.config.extra }}
+          needs: check
+
+      - uses: r-lib/actions/check-r-package@v2
+        with:
+          upload-snapshots: true
+          build_args: 'c("--no-manual","--compact-vignettes=gs+qpdf")'

@@ -1,0 +1,32 @@
+[workspace]
+members = ['a5pyramid']
+
+# The R package's bindings. The engine is the `a5pyramid` crate in
+# ./a5pyramid, which has no R dependency so it can be published on its own;
+# this crate only converts between R objects and its types.
+[package]
+name = 'a5pyramid-r'
+publish = false
+version = '0.0.0'
+edition = '2021'
+rust-version = '1.88'
+
+[lib]
+crate-type = [ 'rlib', 'staticlib' ]
+name = 'a5pyramid_r'
+
+[[bin]]
+name = 'document'
+path = 'document.rs'
+
+[dependencies]
+a5pyramid = { path = 'a5pyramid' }
+a5 = '=1.0.0'
+arrow-array = '60'
+arrow-schema = '60'
+extendr-api = '0.9.0'
+rayon = '1.11'
+
+[profile.release]
+lto = true
+codegen-units = 1

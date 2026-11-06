@@ -1,0 +1,38 @@
+url: https://belian-earth.github.io/a5pyramid/
+development:
+  mode: auto
+template:
+  bootstrap: 5
+  bootswatch: cosmo
+  bslib:
+    primary: '#74ac90ff'
+navbar:
+  structure:
+    left:
+    - reference
+    - news
+    right:
+    - search
+    - github
+  components:
+    github:
+      icon: fa-github
+      href: https://github.com/belian-earth/a5pyramid
+      aria-label: GitHub
+reference:
+- title: Building pyramids
+  desc: Aggregate A5 cells to coarser levels of detail, in memory or to Parquet.
+  contents:
+  - a5_pyramid
+  - a5_write_pyramid
+- title: Reading pyramids
+  desc: A file's index and levels, read as a renderer reads them.
+  contents:
+  - a5_pyramid_info
+  - a5_read_pyramid
+- title: Configuration
+  contents:
+  - a5pyramid_threads
+- title: Package overview
+  contents:
+  - a5pyramid-package

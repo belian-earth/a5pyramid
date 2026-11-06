@@ -1,0 +1,47 @@
+Package: a5pyramid
+Title: Level-of-Detail Pyramids of 'A5' Cells for Browser Rendering
+Version: 0.0.0.9000
+Authors@R: c(
+    person("Hugh", "Graham", role = c("aut", "cre"),
+           email = "hugh@belian.earth"),
+    person("belian.earth", role = "cph")
+    )
+Description: Builds level-of-detail pyramids of 'A5' discrete global grid
+    cells <https://a5geo.org/>, as created by 'a5R', and writes them with
+    the cells they summarise to one 'Parquet' file laid out for browsers.
+    Each coarser level groups the cells by the coarse cell containing
+    their centres and reduces each column by mean, sum, minimum, maximum,
+    mode or a representative cell. Each level is split into tiles of
+    nearby cells, one row group each, and the file's metadata indexes
+    every tile's level and bounding box, so a web map can fetch only the
+    tiles in view with HTTP range requests. The engine is written in
+    'Rust' and runs in parallel.
+License: Apache License (>= 2)
+URL: https://github.com/belian-earth/a5pyramid, https://belian-earth.github.io/a5pyramid/
+BugReports: https://github.com/belian-earth/a5pyramid/issues
+Depends:
+    R (>= 4.2)
+Imports:
+    a5R (>= 1.0.0),
+    cli,
+    rlang (>= 1.1.0),
+    tibble,
+    tidyselect,
+    utils
+Suggests:
+    a5view (>= 0.3.0.9000),
+    arrow,
+    jsonlite,
+    testthat (>= 3.0.0),
+    withr
+Remotes:
+    belian-earth/a5R,
+    belian-earth/a5view,
+    r-spatial/geoarrowWidget
+Config/testthat/edition: 3
+Config/rextendr/version: 0.5.0
+SystemRequirements: Cargo (Rust's package manager), rustc >= 1.88.0
+Encoding: UTF-8
+Language: en-GB
+Roxygen: list(markdown = TRUE)
+Config/roxygen2/version: 8.0.0
