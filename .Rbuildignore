@@ -18,6 +18,7 @@
 ^pkgdown$
 ^\.github$
 ^codecov\.yml$
+^inst/hex/a5pyramidhex\.R$
 ^tests/testthat/_problems$
 ^doc$
 ^Meta$
