@@ -15,6 +15,14 @@ a5pyramid_build_rs <- function(cells, values, names, types, reducers, weights, l
 #' @keywords internal
 a5pyramid_write_rs <- function(cells, values, names, types, reducers, weights, lods, dest, tile_size, compression, meta_keys, meta_values, generator, threads) .Call(wrap__a5pyramid_write_rs, cells, values, names, types, reducers, weights, lods, dest, tile_size, compression, meta_keys, meta_values, generator, threads)
 
+#' Build a pyramid, tile it, and export the tiles as an Arrow C stream:
+#' `holder` (an external pointer owning the stream until it is imported)
+#' and `address`, its address as a decimal string. Batches are built as
+#' the stream is read.
+#' @noRd
+#' @keywords internal
+a5pyramid_arrow_rs <- function(cells, values, names, types, reducers, weights, lods, tile_size, meta_keys, meta_values, generator, threads) .Call(wrap__a5pyramid_arrow_rs, cells, values, names, types, reducers, weights, lods, tile_size, meta_keys, meta_values, generator, threads)
+
 #' The index and Parquet layout of a pyramid file.
 #' @noRd
 #' @keywords internal

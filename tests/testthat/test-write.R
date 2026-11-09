@@ -28,18 +28,18 @@ test_that("the index describes the file", {
   expect_identical(info$columns$reducer, "max")
   expect_identical(info$metadata, c(app = "a", note = "b"))
   expect_identical(info$levels$rows[info$levels$lod == 15L], as.double(nrow(x)))
-  expect_identical(sum(info$levels$row_groups), nrow(info$row_groups))
-  expect_true(all(info$row_groups$rows <= 300))
-  expect_identical(sum(info$row_groups$rows), sum(info$levels$rows))
+  expect_identical(sum(info$levels$tiles), nrow(info$tiles))
+  expect_true(all(info$tiles$rows <= 300))
+  expect_identical(sum(info$tiles$rows), sum(info$levels$rows))
   expect_identical(info$bytes, file.size(path))
   expect_true(info$footer_bytes > 0 && info$footer_bytes < info$bytes)
-  expect_identical(info$row_groups$row_group, seq_len(nrow(info$row_groups)) - 1L)
-  # row groups follow the levels, coarsest first
-  expect_false(is.unsorted(info$row_groups$lod))
+  expect_identical(info$tiles$tile, seq_len(nrow(info$tiles)) - 1L)
+  # tiles follow the levels, coarsest first
+  expect_false(is.unsorted(info$tiles$lod))
 
   # every leaf lies in the box of its row group, and in the file's box
   leaves <- a5_read_pyramid(path, lod = 15L)
-  rg <- info$row_groups[info$row_groups$lod == 15L, ]
+  rg <- info$tiles[info$tiles$lod == 15L, ]
   which_rg <- rep(seq_len(nrow(rg)), rg$rows)
   ll <- unclass(a5R::a5_cell_to_lonlat(leaves$cell))
   expect_true(all(ll$x >= rg$xmin[which_rg] & ll$x <= rg$xmax[which_rg]))
@@ -49,7 +49,7 @@ test_that("the index describes the file", {
   expect_match(cli::cli_fmt(print(info))[1], "a5pyramid file")
 })
 
-test_that("reading by LOD and bbox returns the row groups in view", {
+test_that("reading by LOD and bbox returns the tiles in view", {
   x <- make_leaves()
   path <- tmp_parquet()
   a5_write_pyramid(x, path, tile_size = 100)
@@ -137,9 +137,14 @@ test_that("Arrow reads the file with its types and index", {
   expect_identical(schema$ncell$type$ToString(), "uint32")
   expect_identical(schema$value$type$ToString(), "float")
   expect_identical(schema$count$type$ToString(), "uint8")
-  expect_identical(reader$num_row_groups, nrow(a5_pyramid_info(path)$row_groups))
+  expect_identical(reader$num_row_groups, nrow(a5_pyramid_info(path)$tiles))
   kv <- schema$metadata
   expect_identical(kv$a5_index, "1.0")
+  if (requireNamespace("jsonlite", quietly = TRUE)) {
+    index <- jsonlite::fromJSON(kv$a5pyramid)
+    expect_named(index$levels, c("lod", "rows", "tiles"))
+    expect_false(any(grepl("row_group", names(index))))
+  }
   expect_match(kv$a5pyramid, '"format_version":1')
   tbl <- reader$ReadTable()
   expect_identical(hex(a5R::a5_cell_from_arrow(tbl$cell)), hex(a5_read_pyramid(path)$cell))

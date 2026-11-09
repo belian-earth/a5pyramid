@@ -13,6 +13,8 @@
 #' - [a5_pyramid()]: build the levels in memory and return them as a tibble.
 #' - [a5_write_pyramid()]: build the levels and write them to Parquet, in
 #'   Rust from end to end.
+#' - [a5_pyramid_arrow()]: build the levels and return the tiles of the
+#'   Parquet layout in memory, as an Arrow table, without a file.
 #'
 #' Each coarser level groups the leaves by the coarse cell containing their
 #' centres ([a5R::a5_cell_to_supercell()]) and reduces each column by mean,

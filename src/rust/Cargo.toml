@@ -22,7 +22,8 @@ path = 'document.rs'
 [dependencies]
 a5pyramid = { path = 'a5pyramid' }
 a5 = '=1.0.0'
-arrow-array = '60'
+# ffi: the tiles reach R through the Arrow C stream interface
+arrow-array = { version = '60', features = ['ffi'] }
 arrow-schema = '60'
 extendr-api = '0.9.0'
 rayon = '1.11'

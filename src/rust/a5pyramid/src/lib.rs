@@ -5,9 +5,10 @@
 //! them, in one Parquet file laid out for a browser to read with range
 //! requests: it fetches the footer, picks the LOD for the current zoom and
 //! the row groups whose bounding boxes meet the viewport, and decodes only
-//! those. The file layout is specified in `FORMAT.md`.
+//! those. The same tiles are available in memory as Arrow record batches.
+//! The layout is specified in `FORMAT.md`.
 //!
-//! Building has two steps:
+//! Building has three steps:
 //!
 //! 1. [`build()`] groups the leaves under each coarser LOD by
 //!    [`a5::cell_to_supercell`], the coarse cell containing a leaf's centre,
@@ -16,13 +17,18 @@
 //!    leaf's supercell two levels up is not always the supercell of its
 //!    supercell), so a LOD aggregated from the one below would misplace
 //!    values.
-//! 2. [`write_parquet()`] splits each level into tiles of contiguous cell ids
-//!    ([`plan_tiles()`]), computes each tile's bounding box from the cell
-//!    boundaries, and writes one row group per tile with the index in the
-//!    file's key-value metadata.
+//! 2. [`TiledPyramid::new()`] splits each level into tiles of contiguous
+//!    cell ids ([`plan_tiles()`]), computes each tile's bounding box from the
+//!    cell boundaries, and indexes them. Each tile is one Arrow record batch,
+//!    with the index in the schema metadata: the pyramid in memory, as a
+//!    renderer reads it. [`TiledPyramid::into_reader()`] streams the batches
+//!    as an [`arrow_array::RecordBatchReader`] for other Arrow libraries.
+//! 3. Optionally, [`write_parquet()`] writes the tiles as row groups of one
+//!    Parquet file, with the index in its key-value metadata.
 //!
-//! [`PyramidFile`] reads the index back and selects and decodes row groups,
-//! as a renderer would.
+//! [`PyramidFile`] reads a file's index back and selects and decodes row
+//! groups, as a renderer would; [`PyramidMeta::select`] does the same
+//! selection on an in-memory index.
 //!
 //! Work runs on the current rayon thread pool; run inside
 //! `ThreadPool::install` to choose the thread count. Results do not depend
@@ -35,6 +41,7 @@ mod column;
 mod error;
 mod meta;
 mod read;
+mod tiled;
 mod tiles;
 mod write;
 
@@ -43,10 +50,11 @@ pub use build::{build, default_lods, Leaves, Level, Pyramid};
 pub use cancel::Cancel;
 pub use column::{Column, ColumnSpec, ColumnType, Reducer};
 pub use error::{Error, Result};
-pub use meta::{ColumnMeta, LevelMeta, PyramidMeta, A5_INDEX, FORMAT_VERSION, META_KEY};
+pub use meta::{ColumnMeta, LevelMeta, PyramidMeta, A5_INDEX, A5_INDEX_KEY, FORMAT_VERSION, META_KEY};
 pub use read::PyramidFile;
+pub use tiled::{TileOptions, TileReader, TiledPyramid};
 pub use tiles::plan_tiles;
-pub use write::{write_parquet, Compression, WriteOptions, WriteSummary};
+pub use write::{write_parquet, Compression, ParquetOptions, WriteSummary};
 
 /// The version of the a5 crate this crate is built with: the exact pin in
 /// `Cargo.toml`, which a unit test holds this to. Recorded in every file.

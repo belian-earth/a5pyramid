@@ -20,6 +20,8 @@ dependency, built to be published on its own.
 \item \code{\link[=a5_pyramid]{a5_pyramid()}}: build the levels in memory and return them as a tibble.
 \item \code{\link[=a5_write_pyramid]{a5_write_pyramid()}}: build the levels and write them to Parquet, in
 Rust from end to end.
+\item \code{\link[=a5_pyramid_arrow]{a5_pyramid_arrow()}}: build the levels and return the tiles of the
+Parquet layout in memory, as an Arrow table, without a file.
 }
 
 Each coarser level groups the leaves by the coarse cell containing their

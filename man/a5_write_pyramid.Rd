@@ -89,10 +89,10 @@ cell id.
 
 The file's key-value metadata holds a JSON index under \code{"a5pyramid"}:
 the leaves' resolution, the value columns with their types and reducers,
-each level's LOD, row count and row groups, and the bounding box of each
-row group, computed from its cells' boundaries. A reader fetches the
-footer, picks the level for the zoom and the row groups whose boxes meet
-the view, and decodes only those. \code{"a5_index"} records the A5 index
+each level's LOD, row count and tiles, and the bounding box of each tile,
+computed from its cells' boundaries. A reader fetches the footer, picks
+the level for the zoom and the tiles whose boxes meet the view, and
+decodes only those row groups. \code{"a5_index"} records the A5 index
 version of the ids, \code{"1.0"}, as across the a5R stack.
 
 The columns are \code{cell} (\code{uint64}), \code{lod} (\code{uint8}), \code{ncell} (\code{uint32})
@@ -116,5 +116,5 @@ a5_pyramid_info(path)
 }
 \seealso{
 \code{\link[=a5_pyramid_info]{a5_pyramid_info()}} to inspect the file, \code{\link[=a5_read_pyramid]{a5_read_pyramid()}} to
-read levels back.
+read levels back, \code{\link[=a5_pyramid_arrow]{a5_pyramid_arrow()}} for the same tiles in memory.
 }

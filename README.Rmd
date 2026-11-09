@@ -43,10 +43,10 @@ on its own.
 
 | | |
 |---|---|
-| Build | `a5_pyramid()` builds the levels as a tibble; `a5_write_pyramid()` builds and writes them to Parquet in Rust, in parallel |
+| Build | `a5_pyramid()` builds the levels as a tibble; `a5_write_pyramid()` builds and writes them to Parquet in Rust, in parallel; `a5_pyramid_arrow()` returns the same tiles in memory as an Arrow table, without a file |
 | Reduce | mean, sum, min, max, mode, or a representative leaf that keeps real combinations of values such as colours |
 | Read | `a5_pyramid_info()` reads the index from the footer; `a5_read_pyramid()` reads levels within a bounding box, as a renderer does |
-| Format | One row group per tile, with each tile's level and bounding box indexed in the file's metadata; specified in [`FORMAT.md`](src/rust/a5pyramid/FORMAT.md) |
+| Format | One tile per Parquet row group (or Arrow record batch), with each tile's level and bounding box indexed in the metadata; specified in [`FORMAT.md`](src/rust/a5pyramid/FORMAT.md) |
 
 ## Installation
 
@@ -118,12 +118,12 @@ fit a tile, so tiles are coarse where data is sparse and fine where it is
 dense, and every level stays sorted by cell id.
 
 **Index.** The file's key-value metadata holds a JSON index of the levels,
-the value columns, and the bounding box of every row group, computed from
+the value columns, and the bounding box of every tile, computed from
 the cells' boundaries (antimeridian and poles included). Cell ids are delta
 encoded, which takes them from 8 bytes per row to about 3, and Snappy
 compression keeps the file readable by hyparquet with no extra libraries.
 The test suite reads files with hyparquet under Node and checks that only
-the footer and the requested row group are fetched.
+the footer and the requested tile are fetched.
 
 ## Performance
 

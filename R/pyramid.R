@@ -76,7 +76,8 @@
 #'   - the value columns, integer for the integer types up to `"uint16"`
 #'     and double otherwise.
 #'
-#' @seealso [a5_write_pyramid()] to write the pyramid for a browser.
+#' @seealso [a5_write_pyramid()] to write the pyramid for a browser,
+#'   [a5_pyramid_arrow()] for the same tiles as an Arrow table.
 #' @export
 #' @examples
 #' library(a5R)
@@ -139,10 +140,10 @@ a5_pyramid <- function(x,
 #'
 #' The file's key-value metadata holds a JSON index under `"a5pyramid"`:
 #' the leaves' resolution, the value columns with their types and reducers,
-#' each level's LOD, row count and row groups, and the bounding box of each
-#' row group, computed from its cells' boundaries. A reader fetches the
-#' footer, picks the level for the zoom and the row groups whose boxes meet
-#' the view, and decodes only those. `"a5_index"` records the A5 index
+#' each level's LOD, row count and tiles, and the bounding box of each tile,
+#' computed from its cells' boundaries. A reader fetches the footer, picks
+#' the level for the zoom and the tiles whose boxes meet the view, and
+#' decodes only those row groups. `"a5_index"` records the A5 index
 #' version of the ids, `"1.0"`, as across the a5R stack.
 #'
 #' The columns are `cell` (`uint64`), `lod` (`uint8`), `ncell` (`uint32`)
@@ -169,7 +170,7 @@ a5_pyramid <- function(x,
 #'
 #' @returns `dest`, invisibly.
 #' @seealso [a5_pyramid_info()] to inspect the file, [a5_read_pyramid()] to
-#'   read levels back.
+#'   read levels back, [a5_pyramid_arrow()] for the same tiles in memory.
 #' @export
 #' @examples
 #' library(a5R)
@@ -220,6 +221,84 @@ a5_write_pyramid <- function(x,
     threads = threads
   ))
   invisible(dest)
+}
+
+#' Build a level-of-detail pyramid as an Arrow table
+#'
+#' Builds the pyramid of [a5_pyramid()] and tiles it as
+#' [a5_write_pyramid()] does, but returns the tiles in memory as an Arrow
+#' `Table` instead of writing a file: the layout of the Parquet file, in
+#' Arrow. Use it where a file is not wanted, such as a viewer that ships the
+#' tiles to a browser itself, or to hand the pyramid to other Arrow tools.
+#'
+#' Each record batch of the table is one tile, in the order of the file's
+#' row groups: `arrow::as_record_batch_reader(tbl)$batches()[[i]]` holds the
+#' rows of row group `i - 1` of the same pyramid written with
+#' [a5_write_pyramid()], and the table's
+#' schema metadata holds the same entries as the file's key-value
+#' metadata: the index under `"a5pyramid"`, whose `tiles` and `tile_bbox`
+#' count record batches here as they count row groups in the file, the A5
+#' index version under
+#' `"a5_index"`, and `metadata`. The columns and their types are those of
+#' the file (see [a5_write_pyramid()]); [a5R::a5_from_arrow_table()]
+#' converts the table to a data frame with an [a5R::a5_cell] column.
+#'
+#' The tiles cross from Rust through the Arrow C stream interface, so no
+#' value is copied through R. `arrow::write_parquet()`, `arrow::write_feather()`
+#' or `arrow::write_to_raw()` serialise the table, but only
+#' [a5_write_pyramid()] writes the encodings and statistics the file format
+#' specifies.
+#'
+#' @inheritParams a5_write_pyramid
+#' @returns An Arrow `Table` with one record batch per tile.
+#' @seealso [a5_write_pyramid()] for the same tiles in a Parquet file.
+#' @export
+#' @examplesIf requireNamespace("arrow", quietly = TRUE)
+#' library(a5R)
+#' centre <- a5_lonlat_to_cell(-3.19, 55.95, resolution = 10)
+#' cells <- a5_uncompact(a5_spherical_cap(centre, 3000), resolution = 15)
+#' x <- data.frame(cell = cells, value = runif(length(cells)))
+#'
+#' tbl <- a5_pyramid_arrow(x, types = c(value = "float32"), tile_size = 500)
+#' tbl
+#' tiles <- arrow::as_record_batch_reader(tbl)$batches()
+#' length(tiles)
+#' index <- tbl$metadata$a5pyramid
+#'
+#' a5_from_arrow_table(tbl)
+a5_pyramid_arrow <- function(x,
+                             ...,
+                             lods = NULL,
+                             aggregate = c("mean", "rep_child"),
+                             reducers = NULL,
+                             weights = NULL,
+                             types = NULL,
+                             tile_size = 4096L,
+                             metadata = NULL,
+                             threads = NULL) {
+  rlang::check_installed("arrow", reason = "to return Arrow tables")
+  aggregate <- rlang::arg_match(aggregate)
+  tile_size <- check_count(tile_size)
+  meta <- check_metadata(metadata)
+  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types)
+  threads <- resolve_threads(threads)
+  stream <- rs_call(a5pyramid_arrow_rs(
+    cells = input$cells,
+    values = input$values,
+    names = input$names,
+    types = input$types,
+    reducers = input$reducers,
+    weights = input$weights,
+    lods = input$lods,
+    tile_size = tile_size,
+    meta_keys = meta$keys,
+    meta_values = meta$values,
+    generator = paste("a5pyramid", utils::packageVersion("a5pyramid")),
+    threads = threads
+  ))
+  # arrow moves the stream out of `stream$holder`, which owns it until then
+  reader <- arrow::RecordBatchReader$import_from_c(stream$address)
+  reader$read_table()
 }
 
 #' The rows from Rust as a tibble

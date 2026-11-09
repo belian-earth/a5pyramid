@@ -10,7 +10,11 @@ hyparquet_path <- function() {
 
 read_hyparquet <- function(path, rg) {
   script <- test_path("js", "read-hyparquet.mjs")
-  out <- system2("node", c(shQuote(script), shQuote(hyparquet_path()), shQuote(path), rg),
+  # an .mjs copy loads as an ES module on every Node version; Node 18 does
+  # not detect module syntax in a .js file
+  lib <- withr::local_tempfile(fileext = ".mjs")
+  file.copy(hyparquet_path(), lib)
+  out <- system2("node", c(shQuote(script), shQuote(lib), shQuote(path), rg),
                  stdout = TRUE, stderr = TRUE)
   status <- attr(out, "status")
   if (!is.null(status) && status != 0L) stop(paste(out, collapse = "\n"))
@@ -26,15 +30,15 @@ test_that("hyparquet reads a row group as a5pyramid wrote it", {
   a5_write_pyramid(x, path, value, count, types = c(value = "float32", count = "uint8"), tile_size = 250)
   info <- a5_pyramid_info(path)
   rows <- a5_read_pyramid(path)
-  starts <- cumsum(c(0, info$row_groups$rows))
+  starts <- cumsum(c(0, info$tiles$rows))
 
-  leaf_rgs <- info$row_groups$row_group[info$row_groups$lod == 15L]
+  leaf_rgs <- info$tiles$tile[info$tiles$lod == 15L]
   for (rg in c(0L, leaf_rgs[2])) {
     js <- read_hyparquet(path, rg)
     want <- rows[(starts[rg + 1] + 1):starts[rg + 2], ]
     expect_identical(js$a5_index, "1.0")
     expect_identical(js$lods, info$lods)
-    expect_identical(js$n_row_groups, nrow(info$row_groups))
+    expect_identical(js$n_row_groups, nrow(info$tiles))
     expect_identical(js$cell_type, "bigint")
     expect_identical(js$cells, hex(want$cell))
     expect_identical(js$lod, want$lod)

@@ -10,8 +10,10 @@ use arrow_schema::DataType;
 use extendr_api::prelude::*;
 
 use a5pyramid::{
-    build, write_parquet, Bbox, Column, ColumnType, Compression, Leaves, Pyramid, PyramidFile, Reducer, WriteOptions,
+    build, write_parquet, Bbox, Column, ColumnType, Compression, Leaves, ParquetOptions, Pyramid, PyramidFile, Reducer,
+    TileOptions, TiledPyramid,
 };
+use arrow_array::ffi_stream::FFI_ArrowArrayStream;
 
 use crate::a5r_api::{cells_from_u64, cells_to_u64};
 use crate::run::{available_cpus, r_error, run};
@@ -196,23 +198,66 @@ fn a5pyramid_write_rs(
     threads: i32,
 ) -> Result<Robj> {
     let leaves = leaves_from_r(&cells, &values, &names, &types, &reducers, &weights)?;
-    let opts = WriteOptions {
-        tile_size: tile_size as usize,
+    let tile_opts = tile_options(tile_size, generator, meta_keys, meta_values);
+    let pq_opts = ParquetOptions {
         compression: Compression::parse(&compression).map_err(r_error)?,
-        generator,
-        metadata: meta_keys.into_iter().zip(meta_values).collect(),
     };
     let summary = run(threads as usize, move |cancel| {
-        let p = build(leaves, &lods, cancel)?;
-        write_parquet(&p, &dest, &opts, cancel)
+        let tiled = TiledPyramid::new(build(leaves, &lods, cancel)?, &tile_opts, cancel)?;
+        write_parquet(&tiled, &dest, &pq_opts, cancel)
     })?;
     Ok(list!(
         rows = summary.rows as f64,
         bytes = summary.bytes as f64,
-        row_groups = summary.meta.n_row_groups() as i32,
-        lods = summary.meta.lods()
+        tiles = summary.row_groups as i32
     )
     .into())
+}
+
+fn tile_options(tile_size: i32, generator: String, keys: Vec<String>, values: Vec<String>) -> TileOptions {
+    TileOptions {
+        tile_size: tile_size.max(0) as usize,
+        generator,
+        metadata: keys.into_iter().zip(values).collect(),
+    }
+}
+
+/// An Arrow C stream exported for the arrow package. The holder owns it
+/// until arrow imports it, which moves the stream out and leaves this one
+/// released; dropping the holder releases a stream that was never taken.
+struct StreamSlot(Box<FFI_ArrowArrayStream>);
+
+/// Build a pyramid, tile it, and export the tiles as an Arrow C stream:
+/// `holder` (an external pointer owning the stream until it is imported)
+/// and `address`, its address as a decimal string. Batches are built as
+/// the stream is read.
+/// @noRd
+/// @keywords internal
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+fn a5pyramid_arrow_rs(
+    cells: Robj,
+    values: List,
+    names: Vec<String>,
+    types: Vec<String>,
+    reducers: Vec<String>,
+    weights: Robj,
+    lods: Vec<i32>,
+    tile_size: i32,
+    meta_keys: Vec<String>,
+    meta_values: Vec<String>,
+    generator: String,
+    threads: i32,
+) -> Result<Robj> {
+    let leaves = leaves_from_r(&cells, &values, &names, &types, &reducers, &weights)?;
+    let tile_opts = tile_options(tile_size, generator, meta_keys, meta_values);
+    let tiled = run(threads as usize, move |cancel| {
+        TiledPyramid::new(build(leaves, &lods, cancel)?, &tile_opts, cancel)
+    })?;
+    let slot = StreamSlot(Box::new(FFI_ArrowArrayStream::new(Box::new(tiled.into_reader()))));
+    let address = (slot.0.as_ref() as *const FFI_ArrowArrayStream as usize).to_string();
+    let holder: Robj = ExternalPtr::new(slot).into();
+    Ok(list!(holder = holder, address = address).into())
 }
 
 /// The index and Parquet layout of a pyramid file.
@@ -222,10 +267,10 @@ fn a5pyramid_write_rs(
 fn a5pyramid_info_rs(src: String) -> Result<Robj> {
     let f = PyramidFile::open(&src).map_err(r_error)?;
     let m = &f.meta;
-    let n_rg = f.n_row_groups();
-    let rg_lod: Vec<i32> = (0..n_rg).map(|rg| m.level_of(rg).map_or(-1, |l| l.lod)).collect();
-    let rg_box: Vec<[f64; 4]> = (0..n_rg).map(|rg| m.row_group_bbox(rg).to_array()).collect();
-    let side = |k: usize| rg_box.iter().map(|b| b[k]).collect::<Vec<f64>>();
+    let n_tiles = f.n_row_groups();
+    let tile_lod: Vec<i32> = (0..n_tiles).map(|i| m.level_of(i).map_or(-1, |l| l.lod)).collect();
+    let tile_box: Vec<[f64; 4]> = (0..n_tiles).map(|i| m.tile_bbox(i).to_array()).collect();
+    let side = |k: usize| tile_box.iter().map(|b| b[k]).collect::<Vec<f64>>();
     let as_f64 = |v: Vec<u64>| v.into_iter().map(|x| x as f64).collect::<Vec<f64>>();
     Ok(list!(
         format_version = m.format_version as i32,
@@ -255,11 +300,11 @@ fn a5pyramid_info_rs(src: String) -> Result<Robj> {
         levels = list!(
             lod = m.levels.iter().map(|l| l.lod).collect::<Vec<_>>(),
             rows = m.levels.iter().map(|l| l.rows as f64).collect::<Vec<_>>(),
-            rg_start = m.levels.iter().map(|l| l.row_groups[0] as i32).collect::<Vec<_>>(),
-            rg_end = m.levels.iter().map(|l| l.row_groups[1] as i32).collect::<Vec<_>>()
+            tile_start = m.levels.iter().map(|l| l.tiles[0] as i32).collect::<Vec<_>>(),
+            tile_end = m.levels.iter().map(|l| l.tiles[1] as i32).collect::<Vec<_>>()
         ),
-        row_groups = list!(
-            lod = rg_lod,
+        tiles = list!(
+            lod = tile_lod,
             rows = as_f64(f.row_group_rows()),
             bytes = as_f64(f.row_group_bytes()),
             west = side(0),
@@ -383,6 +428,7 @@ extendr_module! {
     mod api;
     fn a5pyramid_build_rs;
     fn a5pyramid_write_rs;
+    fn a5pyramid_arrow_rs;
     fn a5pyramid_info_rs;
     fn a5pyramid_read_rs;
     fn a5pyramid_available_cpus_rs;
