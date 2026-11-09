@@ -33,7 +33,7 @@ tile <- paste0(
 leaves <- a5px::a5_read_raster(
   tile,
   resolution = leaf_res,
-  bands = 10:12,
+  bands = 1:12,
   bbox = bbox,
   io_concurrency = 16L
 )
@@ -46,7 +46,9 @@ leaves <- leaves[a5R::a5_cell_to_supercell(leaves$cell, top_res) == top, ]
 # real leaf at each coarse cell rather than a blend.
 pyr <- a5_pyramid(
   leaves,
-  A09, A10, A11,
+  A01,
+  A02,
+  A11,
   lods = top_res:(leaf_res - 1L),
   aggregate = "rep_child"
 )
@@ -59,12 +61,14 @@ pyr <- a5_pyramid(
 # at 50%.
 stretch <- function(v, lo, hi) pmin(pmax((v - lo) / (hi - lo), 0), 1)
 hsv_mat <- rgb2hsv(
-  stretch(pyr$A09, -43, 69),
-  stretch(pyr$A10, -60, 34),
+  stretch(pyr$A01, -43, 69),
+  stretch(pyr$A02, -60, 34),
   stretch(pyr$A11, 22, 72),
   maxColorValue = 1
 )
-shade <- function(v) hsv(hsv_mat[1, ], pmin(hsv_mat[2, ] * 1.15, 1), hsv_mat[3, ] * v)
+shade <- function(v) {
+  hsv(hsv_mat[1, ], pmin(hsv_mat[2, ] * 1.15, 1), hsv_mat[3, ] * v)
+}
 pyr$top_fill <- shade(0.9)
 pyr$side_fill <- shade(0.5)
 
@@ -116,17 +120,26 @@ for (k in seq_along(lods)) {
     hy <- c(sy[w], sy[w] - thickness)
     h <- grDevices::chull(hx, hy)
     polys[[length(polys) + 1L]] <- data.frame(
-      x = hx[h], y = hy[h], fill = level$side_fill[i], line = NA
+      x = hx[h],
+      y = hy[h],
+      fill = level$side_fill[i],
+      line = NA
     )
   }
   for (i in unique(xy$id)) {
     w <- xy$id == i
     polys[[length(polys) + 1L]] <- data.frame(
-      x = sx[w], y = sy[w], fill = level$top_fill[i], line = "#74ac9071"
+      x = sx[w],
+      y = sy[w],
+      fill = level$top_fill[i],
+      line = "#74ac9071"
     )
   }
 }
-polys <- do.call(rbind, Map(function(p, g) cbind(p, group = g), polys, seq_along(polys)))
+polys <- do.call(
+  rbind,
+  Map(function(p, g) cbind(p, group = g), polys, seq_along(polys))
+)
 
 # Into the frame [-1, 1]: the stack 1.25 tall with its top at 0.78, the
 # label below it.
