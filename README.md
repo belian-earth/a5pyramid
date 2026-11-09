@@ -74,13 +74,13 @@ a5_write_pyramid(
 
 ``` r
 a5_pyramid_info(path)
-#> ── a5pyramid file 'file2fd74b22e0918a.parquet' ─────────────────────────────────
-#> Size: 380.3 KB (footer 10.8 KB)
+#> ── a5pyramid file 'file2b25b31ec7da4.parquet' ──────────────────────────────────
+#> Size: 380.2 KB (footer 10.7 KB)
 #> A5 index: 1.0
 #> Leaves: resolution 18, 15,626 cells
 #> LODs: 2-18 (17 levels)
 #> Rows: 21,077
-#> Row groups: 22 (tile size 4096)
+#> Tiles: 22 row groups (tile size 4096)
 #> Columns: B02 <uint16, rep_child>, B03 <uint16, rep_child>, B04 <uint16,
 #> rep_child>, B08 <uint16, rep_child>, ndvi <float32, mean>
 #> Bbox: -70.6722, -33.4801, -70.6418, -33.4549
@@ -121,13 +121,12 @@ more cells than fit a tile, so tiles are coarse where data is sparse and
 fine where it is dense, and every level stays sorted by cell id.
 
 **Index.** The file’s key-value metadata holds a JSON index of the
-levels, the value columns, and the bounding box of every tile,
-computed from the cells’ boundaries (antimeridian and poles included).
-Cell ids are delta encoded, which takes them from 8 bytes per row to
-about 3, and Snappy compression keeps the file readable by hyparquet
-with no extra libraries. The test suite reads files with hyparquet under
-Node and checks that only the footer and the requested tile are
-fetched.
+levels, the value columns, and the bounding box of every tile, computed
+from the cells’ boundaries (antimeridian and poles included). Cell ids
+are delta encoded, which takes them from 8 bytes per row to about 3, and
+Snappy compression keeps the file readable by hyparquet with no extra
+libraries. The test suite reads files with hyparquet under Node and
+checks that only the footer and the requested tile are fetched.
 
 ## Performance
 
