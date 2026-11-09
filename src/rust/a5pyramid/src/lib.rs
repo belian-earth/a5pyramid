@@ -41,6 +41,7 @@ mod column;
 mod error;
 mod meta;
 mod read;
+mod set;
 mod tiled;
 mod tiles;
 mod write;
@@ -50,8 +51,11 @@ pub use build::{build, default_lods, Leaves, Level, Pyramid};
 pub use cancel::Cancel;
 pub use column::{Column, ColumnSpec, ColumnType, Reducer};
 pub use error::{Error, Result};
-pub use meta::{ColumnMeta, LevelMeta, PyramidMeta, A5_INDEX, A5_INDEX_KEY, FORMAT_VERSION, META_KEY};
+pub use meta::{ColumnMeta, LevelMeta, PyramidMeta, ShardMeta, A5_INDEX, A5_INDEX_KEY, FORMAT_VERSION, META_KEY};
 pub use read::PyramidFile;
+pub use set::{
+    default_tiers, write_set, SetMeta, SetOptions, ShardEntry, Tier, DEFAULT_SET_TILE_SIZE, SET_FORMAT, SET_INDEX,
+};
 pub use tiled::{TileOptions, TileReader, TiledPyramid};
 pub use tiles::plan_tiles;
 pub use write::{write_parquet, Compression, ParquetOptions, WriteSummary};

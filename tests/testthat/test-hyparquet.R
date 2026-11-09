@@ -50,3 +50,28 @@ test_that("hyparquet reads a row group as a5pyramid wrote it", {
     expect_lt(js$fetched_bytes, info$bytes / 4)
   }
 })
+
+test_that("hyparquet reads a shard of a set, footer in one request", {
+  hyparquet_path()
+  skip_if_not_installed("jsonlite")
+  x <- make_leaves()
+  dest <- withr::local_tempfile()
+  tiers <- data.frame(lod_min = c(2L, 13L), lod_max = c(12L, 15L),
+                      shard_resolution = c(0L, 10L), tile_size = c(100L, 300L))
+  a5_write_pyramid_set(x, dest, value, types = c(value = "float32"), tiers = tiers)
+  set <- a5_pyramid_set_info(dest)
+  sh <- set$shards[set$shards$tier == 1L, ][1, ]
+  path <- file.path(dest, sh$path)
+  info <- a5_pyramid_info(path)
+  rows <- a5_read_pyramid(path)
+  js <- read_hyparquet(path, 0L)
+  expect_identical(js$format_version, 2L)
+  expect_identical(js$shard$cell, hex(sh$cell))
+  expect_identical(js$shard$tier, 1L)
+  expect_identical(js$lods, 13:15)
+  expect_identical(js$footer_fetches, 1L)
+  expect_lt(sh$footer_bytes, 512 * 1024)
+  first <- seq_len(info$tiles$rows[1])
+  expect_identical(js$cells, hex(rows$cell[first]))
+  expect_equal(js$columns$value, rows$value[first])
+})

@@ -23,6 +23,23 @@ a5pyramid_write_rs <- function(cells, values, names, types, reducers, weights, l
 #' @keywords internal
 a5pyramid_arrow_rs <- function(cells, values, names, types, reducers, weights, lods, tile_size, meta_keys, meta_values, generator, threads) .Call(wrap__a5pyramid_arrow_rs, cells, values, names, types, reducers, weights, lods, tile_size, meta_keys, meta_values, generator, threads)
 
+#' Build a pyramid and write it as a set of shard files in `dest`; returns
+#' the set's index.
+#' @noRd
+#' @keywords internal
+a5pyramid_write_set_rs <- function(cells, values, names, types, reducers, weights, lods, dest, tier_lod_min, tier_lod_max, tier_shard_resolution, tier_tile_size, compression, meta_keys, meta_values, generator, threads) .Call(wrap__a5pyramid_write_set_rs, cells, values, names, types, reducers, weights, lods, dest, tier_lod_min, tier_lod_max, tier_shard_resolution, tier_tile_size, compression, meta_keys, meta_values, generator, threads)
+
+#' The default tiers of a set with leaves at `data_resolution` and levels
+#' at `lods`.
+#' @noRd
+#' @keywords internal
+a5pyramid_default_tiers_rs <- function(data_resolution, lods) .Call(wrap__a5pyramid_default_tiers_rs, data_resolution, lods)
+
+#' The index of the set at `src` (its directory or `set.json`).
+#' @noRd
+#' @keywords internal
+a5pyramid_set_info_rs <- function(src) .Call(wrap__a5pyramid_set_info_rs, src)
+
 #' The index and Parquet layout of a pyramid file.
 #' @noRd
 #' @keywords internal

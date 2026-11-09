@@ -30,6 +30,9 @@ readers count), \code{lod}, \code{rows}, \code{bytes} (compressed size, what a
 reader fetches) and \code{xmin}, \code{ymin}, \code{xmax}, \code{ymax}.
 \item \code{metadata}: the file's other key-value metadata, a named character
 vector.
+\item \code{shard}: for a shard of a pyramid set (format version 2, written by
+\code{\link[=a5_write_pyramid_set]{a5_write_pyramid_set()}}), a list of its \code{tier}, shard \code{cell} (hex)
+and its shard \code{resolution}; \code{NULL} for a single file.
 }
 }
 \description{

@@ -10,8 +10,8 @@ use arrow_schema::DataType;
 use extendr_api::prelude::*;
 
 use a5pyramid::{
-    build, write_parquet, Bbox, Column, ColumnType, Compression, Leaves, ParquetOptions, Pyramid, PyramidFile, Reducer,
-    TileOptions, TiledPyramid,
+    build, default_tiers, write_parquet, write_set, Bbox, Column, ColumnType, Compression, Leaves, ParquetOptions,
+    Pyramid, PyramidFile, Reducer, SetMeta, SetOptions, ShardEntry, Tier, TileOptions, TiledPyramid,
 };
 use arrow_array::ffi_stream::FFI_ArrowArrayStream;
 
@@ -219,7 +219,143 @@ fn tile_options(tile_size: i32, generator: String, keys: Vec<String>, values: Ve
         tile_size: tile_size.max(0) as usize,
         generator,
         metadata: keys.into_iter().zip(values).collect(),
+        shard: None,
     }
+}
+
+/// Tiers from R's columns, one tier per element.
+fn tiers_from_r(lod_min: &[i32], lod_max: &[i32], shard: &[i32], tile_size: &[i32]) -> Result<Vec<Tier>> {
+    let n = lod_min.len();
+    if lod_max.len() != n || shard.len() != n || tile_size.len() != n {
+        return Err(other("internal error: tier columns differ in length"));
+    }
+    Ok((0..n)
+        .map(|k| Tier {
+            lods: [lod_min[k], lod_max[k]],
+            shard_resolution: shard[k],
+            tile_size: tile_size[k].max(0) as usize,
+        })
+        .collect())
+}
+
+fn tiers_to_r(tiers: &[Tier]) -> Robj {
+    list!(
+        lod_min = tiers.iter().map(|t| t.lods[0]).collect::<Vec<_>>(),
+        lod_max = tiers.iter().map(|t| t.lods[1]).collect::<Vec<_>>(),
+        shard_resolution = tiers.iter().map(|t| t.shard_resolution).collect::<Vec<_>>(),
+        tile_size = tiers.iter().map(|t| t.tile_size as i32).collect::<Vec<_>>()
+    )
+    .into()
+}
+
+/// A set's index for R, its shards as columns.
+fn set_to_r(m: &SetMeta) -> Result<Robj> {
+    let cells = m
+        .shards
+        .iter()
+        .map(|s| u64::from_str_radix(&s.cell, 16))
+        .collect::<std::result::Result<Vec<u64>, _>>()
+        .map_err(|_| other("format error: a shard cell in the set index is not 16 hex digits"))?;
+    let side = |k: usize| m.shards.iter().map(|s| s.bbox[k]).collect::<Vec<f64>>();
+    let as_f64 = |f: &dyn Fn(&ShardEntry) -> u64| m.shards.iter().map(|s| f(s) as f64).collect::<Vec<f64>>();
+    Ok(list!(
+        format_version = m.format_version as i32,
+        generator = m.generator.clone(),
+        a5_crate = m.a5_crate.clone(),
+        a5_index = m.a5_index.clone(),
+        data_resolution = m.data_resolution,
+        bbox = m.bbox.to_vec(),
+        columns = List::from_pairs(vec![
+            (
+                "name",
+                Robj::from(m.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>())
+            ),
+            (
+                "type",
+                Robj::from(m.columns.iter().map(|c| c.ty.clone()).collect::<Vec<_>>())
+            ),
+            (
+                "reducer",
+                Robj::from(m.columns.iter().map(|c| c.reducer.clone()).collect::<Vec<_>>())
+            ),
+        ]),
+        tiers = tiers_to_r(&m.tiers),
+        shards = list!(
+            tier = m.shards.iter().map(|s| s.tier as i32).collect::<Vec<_>>(),
+            cell = cells_from_u64(&cells),
+            path = m.shards.iter().map(|s| s.path.clone()).collect::<Vec<_>>(),
+            rows = as_f64(&|s| s.rows),
+            tiles = m.shards.iter().map(|s| s.tiles as i32).collect::<Vec<_>>(),
+            bytes = as_f64(&|s| s.bytes),
+            footer_bytes = as_f64(&|s| s.footer_bytes),
+            west = side(0),
+            south = side(1),
+            east = side(2),
+            north = side(3)
+        ),
+        metadata = list!(
+            key = m.metadata.keys().cloned().collect::<Vec<_>>(),
+            value = m.metadata.values().cloned().collect::<Vec<_>>()
+        )
+    )
+    .into())
+}
+
+/// Build a pyramid and write it as a set of shard files in `dest`; returns
+/// the set's index.
+/// @noRd
+/// @keywords internal
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+fn a5pyramid_write_set_rs(
+    cells: Robj,
+    values: List,
+    names: Vec<String>,
+    types: Vec<String>,
+    reducers: Vec<String>,
+    weights: Robj,
+    lods: Vec<i32>,
+    dest: String,
+    tier_lod_min: Vec<i32>,
+    tier_lod_max: Vec<i32>,
+    tier_shard_resolution: Vec<i32>,
+    tier_tile_size: Vec<i32>,
+    compression: String,
+    meta_keys: Vec<String>,
+    meta_values: Vec<String>,
+    generator: String,
+    threads: i32,
+) -> Result<Robj> {
+    let leaves = leaves_from_r(&cells, &values, &names, &types, &reducers, &weights)?;
+    let opts = SetOptions {
+        tiers: tiers_from_r(&tier_lod_min, &tier_lod_max, &tier_shard_resolution, &tier_tile_size)?,
+        generator,
+        metadata: meta_keys.into_iter().zip(meta_values).collect(),
+        parquet: ParquetOptions {
+            compression: Compression::parse(&compression).map_err(r_error)?,
+        },
+    };
+    let meta = run(threads as usize, move |cancel| {
+        write_set(build(leaves, &lods, cancel)?, &dest, &opts, cancel)
+    })?;
+    set_to_r(&meta)
+}
+
+/// The default tiers of a set with leaves at `data_resolution` and levels
+/// at `lods`.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5pyramid_default_tiers_rs(data_resolution: i32, lods: Vec<i32>) -> Robj {
+    tiers_to_r(&default_tiers(data_resolution, &lods))
+}
+
+/// The index of the set at `src` (its directory or `set.json`).
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5pyramid_set_info_rs(src: String) -> Result<Robj> {
+    set_to_r(&SetMeta::read(&src).map_err(r_error)?)
 }
 
 /// An Arrow C stream exported for the arrow package. The holder owns it
@@ -317,7 +453,11 @@ fn a5pyramid_info_rs(src: String) -> Result<Robj> {
             value = f.metadata.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>()
         ),
         bytes = f.bytes as f64,
-        footer_bytes = f.footer_bytes() as f64
+        footer_bytes = f.footer_bytes() as f64,
+        shard = match &m.shard {
+            None => Robj::from(()),
+            Some(s) => list!(tier = s.tier as i32, cell = s.cell.clone(), resolution = s.resolution).into(),
+        }
     )
     .into())
 }
@@ -429,6 +569,9 @@ extendr_module! {
     fn a5pyramid_build_rs;
     fn a5pyramid_write_rs;
     fn a5pyramid_arrow_rs;
+    fn a5pyramid_write_set_rs;
+    fn a5pyramid_default_tiers_rs;
+    fn a5pyramid_set_info_rs;
     fn a5pyramid_info_rs;
     fn a5pyramid_read_rs;
     fn a5pyramid_available_cpus_rs;

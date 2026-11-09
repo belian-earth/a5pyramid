@@ -354,7 +354,8 @@ pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
     types = unname(types_v),
     reducers = unname(reducers_v),
     weights = weights_v,
-    lods = lods
+    lods = lods,
+    resolution = resolution
   )
 }
 

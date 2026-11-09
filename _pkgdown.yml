@@ -31,6 +31,12 @@ reference:
   contents:
   - a5_pyramid_info
   - a5_read_pyramid
+- title: Pyramid sets
+  desc: One pyramid as many small files, so a browser opens only those around a view.
+  contents:
+  - a5_write_pyramid_set
+  - a5_pyramid_set_tiers
+  - a5_pyramid_set_info
 - title: Configuration
   contents:
   - a5pyramid_threads
