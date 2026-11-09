@@ -26,7 +26,7 @@ use crate::bbox::Bbox;
 use crate::build::{Level, Pyramid};
 use crate::cancel::Cancel;
 use crate::error::{invalid, Error, Result};
-use crate::meta::{column_meta, ColumnMeta, ShardMeta, A5_INDEX, FORMAT_VERSION};
+use crate::meta::{column_meta, ColumnMeta, ShardMeta, A5_INDEX, FORMAT_VERSION, SHARD_FILE_VERSION};
 use crate::read::PyramidFile;
 use crate::tiled::{TileOptions, TiledPyramid};
 use crate::write::{write_parquet, ParquetOptions};
@@ -224,15 +224,61 @@ impl SetMeta {
 /// be empty: one shard file per tier and shard cell holding cells, at
 /// `tier=<t>/shard=<cell>.parquet`, then `set.json`. The index is written
 /// last and renamed into place, so a reader never finds an index that
-/// names a missing shard; a failed or cancelled write leaves no index.
+/// names a missing shard. A write that fails or is cancelled removes what it
+/// wrote (and `dir`, if it created it), so it can be run again.
 ///
 /// Shards are written one at a time, each tiled in parallel, and each
 /// tier's levels are released once its shards are written.
 pub fn write_set(pyramid: Pyramid, dir: impl AsRef<Path>, opts: &SetOptions, cancel: &Cancel) -> Result<SetMeta> {
     let dir = dir.as_ref();
     let tiers = check_tiers(&opts.tiers, &pyramid.lods())?;
-    prepare_dir(dir)?;
+    let created = prepare_dir(dir)?;
+    let mut written = Written::default();
+    match write_shards(pyramid, dir, tiers, opts, cancel, &mut written) {
+        Ok(meta) => Ok(meta),
+        Err(e) => {
+            written.remove(dir, created);
+            Err(e)
+        }
+    }
+}
 
+/// What a write created, removed again if it fails.
+#[derive(Default)]
+struct Written {
+    files: Vec<PathBuf>,
+    dirs: Vec<PathBuf>,
+}
+
+impl Written {
+    fn remove(&self, dir: &Path, created: bool) {
+        for f in &self.files {
+            let _ = std::fs::remove_file(f);
+        }
+        for d in self.dirs.iter().rev() {
+            let _ = std::fs::remove_dir(d);
+        }
+        if created {
+            // only if empty: never removes anything this write did not put there
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: fail the write once this many shards are written.
+    static FAIL_AFTER_SHARDS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+fn write_shards(
+    pyramid: Pyramid,
+    dir: &Path,
+    tiers: Vec<Tier>,
+    opts: &SetOptions,
+    cancel: &Cancel,
+    written: &mut Written,
+) -> Result<SetMeta> {
     let Pyramid {
         data_resolution,
         columns,
@@ -254,10 +300,13 @@ pub fn write_set(pyramid: Pyramid, dir: impl AsRef<Path>, opts: &SetOptions, can
             .map(|l| owner_rows(l, tier.shard_resolution))
             .collect::<Result<_>>()?;
         cancel.check()?;
-        let mut cells: Vec<u64> = owners.iter().flat_map(|o| o.iter().map(|&(s, _)| s)).collect();
-        cells.par_sort_unstable();
-        cells.dedup();
+        let cells = shard_cells(&owners);
 
+        let tier_dir = dir.join(format!("tier={t}"));
+        if !cells.is_empty() && !tier_dir.exists() {
+            std::fs::create_dir(&tier_dir)?;
+            written.dirs.push(tier_dir);
+        }
         // every level's rows are consumed shard by shard, in shard order
         let mut next = vec![0usize; tier_levels.len()];
         for &cell in &cells {
@@ -279,7 +328,6 @@ pub fn write_set(pyramid: Pyramid, dir: impl AsRef<Path>, opts: &SetOptions, can
             };
             let rel = format!("tier={t}/shard={}.parquet", shard.cell);
             let path = dir.join(&rel);
-            std::fs::create_dir_all(path.parent().unwrap_or(dir))?;
             let tile_opts = TileOptions {
                 tile_size: tier.tile_size,
                 generator: opts.generator.clone(),
@@ -292,17 +340,23 @@ pub fn write_set(pyramid: Pyramid, dir: impl AsRef<Path>, opts: &SetOptions, can
                 levels: shard_levels,
             };
             let tiled = TiledPyramid::new(shard_pyramid, &tile_opts, cancel)?;
-            let written = write_parquet(&tiled, &path, &opts.parquet, cancel)?;
+            // write_parquet removes its own partial file on failure
+            let summary = write_parquet(&tiled, &path, &opts.parquet, cancel)?;
+            written.files.push(path.clone());
             shards.push(ShardEntry {
                 tier: t,
                 cell: shard.cell,
                 path: rel,
-                rows: written.rows,
-                tiles: written.row_groups,
-                bytes: written.bytes,
+                rows: summary.rows,
+                tiles: summary.row_groups,
+                bytes: summary.bytes,
                 footer_bytes: PyramidFile::open(&path)?.footer_bytes(),
                 bbox: tiled.meta().bbox,
             });
+            #[cfg(test)]
+            if FAIL_AFTER_SHARDS.with(|f| f.get()) == Some(shards.len()) {
+                return Err(invalid("injected failure"));
+            }
         }
     }
 
@@ -317,7 +371,7 @@ pub fn write_set(pyramid: Pyramid, dir: impl AsRef<Path>, opts: &SetOptions, can
         .collect();
     let meta = SetMeta {
         format: SET_FORMAT.to_string(),
-        format_version: FORMAT_VERSION,
+        format_version: SHARD_FILE_VERSION,
         generator: opts.generator.clone(),
         a5_crate: crate::A5_CRATE_VERSION.to_string(),
         a5_index: A5_INDEX.to_string(),
@@ -330,9 +384,29 @@ pub fn write_set(pyramid: Pyramid, dir: impl AsRef<Path>, opts: &SetOptions, can
     };
     let index = dir.join(SET_INDEX);
     let tmp = partial(&index);
+    written.files.push(tmp.clone());
     std::fs::write(&tmp, meta.to_json()?)?;
     std::fs::rename(&tmp, &index)?;
     Ok(meta)
+}
+
+/// The shard cells owning rows of a tier, ascending: each level's owners are
+/// sorted, so a scan finds its few distinct cells without sorting every row
+/// again.
+fn shard_cells(owners: &[Vec<(u64, u32)>]) -> Vec<u64> {
+    let mut cells = Vec::new();
+    for rows in owners {
+        let mut last = None;
+        for &(s, _) in rows {
+            if last != Some(s) {
+                cells.push(s);
+                last = Some(s);
+            }
+        }
+    }
+    cells.sort_unstable();
+    cells.dedup();
+    cells
 }
 
 /// The tiers in ascending LOD order, after checking that they are sound and
@@ -387,8 +461,8 @@ fn check_tiers(tiers: &[Tier], lods: &[i32]) -> Result<Vec<Tier>> {
 }
 
 /// Create `dir`, or check that it is an empty directory, so a set never
-/// mixes with files from another.
-fn prepare_dir(dir: &Path) -> Result<()> {
+/// mixes with files from another. Whether it was created.
+fn prepare_dir(dir: &Path) -> Result<bool> {
     if dir.exists() {
         if !dir.is_dir() {
             return Err(invalid(format!("{} exists and is not a directory", dir.display())));
@@ -399,10 +473,10 @@ fn prepare_dir(dir: &Path) -> Result<()> {
                 dir.display()
             )));
         }
-        return Ok(());
+        return Ok(false);
     }
     std::fs::create_dir_all(dir)?;
-    Ok(())
+    Ok(true)
 }
 
 /// Each row's shard cell with the row, sorted.
@@ -695,8 +769,53 @@ mod tests {
             write_set(p, &dir, &opts(tiers()), &stop),
             Err(Error::Cancelled)
         ));
-        assert!(!dir.join(SET_INDEX).exists());
-        let _ = std::fs::remove_dir_all(&dir);
+        // the directory it created is gone again
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_failed_write_removes_what_it_wrote() {
+        let p = pyramid();
+        // into a directory the write creates: removed with the shards
+        let dir = tempdir("fail-new");
+        FAIL_AFTER_SHARDS.with(|f| f.set(Some(3)));
+        let out = write_set(p.clone(), &dir, &opts(tiers()), &Cancel::new());
+        FAIL_AFTER_SHARDS.with(|f| f.set(None));
+        assert!(matches!(out, Err(Error::Invalid(_))));
+        assert!(!dir.exists());
+
+        // into an empty directory that was there: left empty, and a retry works
+        let dir = tempdir("fail-existing");
+        std::fs::create_dir_all(&dir).unwrap();
+        FAIL_AFTER_SHARDS.with(|f| f.set(Some(5)));
+        let out = write_set(p.clone(), &dir, &opts(tiers()), &Cancel::new());
+        FAIL_AFTER_SHARDS.with(|f| f.set(None));
+        assert!(out.is_err());
+        assert!(dir.exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let meta = write_set(p, &dir, &opts(tiers()), &Cancel::new()).unwrap();
+        assert!(meta.shards.len() > 5);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sets_and_shards_record_version_2() {
+        let dir = tempdir("versions");
+        let meta = write_set(pyramid(), &dir, &opts(tiers()), &Cancel::new()).unwrap();
+        assert_eq!(meta.format_version, 2);
+        let f = PyramidFile::open(dir.join(&meta.shards[0].path)).unwrap();
+        assert_eq!(f.meta.format_version, 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn shard_cells_are_the_distinct_owners() {
+        let owners = vec![
+            vec![(5, 0), (5, 1), (9, 2)],
+            vec![],
+            vec![(1, 0), (9, 1), (9, 2), (12, 3)],
+        ];
+        assert_eq!(shard_cells(&owners), vec![1, 5, 9, 12]);
     }
 
     #[test]

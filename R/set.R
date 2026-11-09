@@ -32,8 +32,10 @@
 #' can hold no cells at some LOD of its tier, never at all of them; shards
 #' without cells are not written. `set.json` lists the tiers and every
 #' shard with its path, rows, tiles, size, footer size and bounding box,
-#' and is written last, so a set with an index is complete. The format is
-#' specified in `FORMAT.md` in the package source.
+#' and is written last, so a set with an index is complete. A write that
+#' fails or is interrupted removes the shards it wrote, and `dest` if it
+#' created it, so it can be run again. The format is specified in
+#' `FORMAT.md` in the package source.
 #'
 #' @inheritParams a5_write_pyramid
 #' @param dest Directory to write the set to. It must not exist or be empty,

@@ -32,7 +32,7 @@ use crate::cancel::Cancel;
 use crate::column::{ColumnSpec, ColumnType};
 use crate::error::{invalid, Error, Result};
 use crate::meta::{
-    column_meta, LevelMeta, PyramidMeta, ShardMeta, A5_INDEX, A5_INDEX_KEY, FORMAT_VERSION, META_KEY,
+    column_meta, LevelMeta, PyramidMeta, ShardMeta, A5_INDEX, A5_INDEX_KEY, META_KEY, SHARD_FILE_VERSION,
     SINGLE_FILE_VERSION,
 };
 use crate::tiles::plan_tiles;
@@ -135,7 +135,7 @@ impl TiledPyramid {
         // has a box.
         let (format_version, boxed) = match opts.shard {
             None => (SINGLE_FILE_VERSION, &leaf_boxes),
-            Some(_) => (FORMAT_VERSION, &all_boxes),
+            Some(_) => (SHARD_FILE_VERSION, &all_boxes),
         };
         let meta = PyramidMeta {
             format_version,

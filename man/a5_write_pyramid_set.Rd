@@ -106,8 +106,10 @@ tiers. \code{\link[=a5_pyramid_info]{a5_pyramid_info()}} and \code{\link[=a5_rea
 can hold no cells at some LOD of its tier, never at all of them; shards
 without cells are not written. \code{set.json} lists the tiers and every
 shard with its path, rows, tiles, size, footer size and bounding box,
-and is written last, so a set with an index is complete. The format is
-specified in \code{FORMAT.md} in the package source.
+and is written last, so a set with an index is complete. A write that
+fails or is interrupted removes the shards it wrote, and \code{dest} if it
+created it, so it can be run again. The format is specified in
+\code{FORMAT.md} in the package source.
 }
 
 \examples{

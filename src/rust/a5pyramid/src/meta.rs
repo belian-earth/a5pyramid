@@ -20,6 +20,9 @@ pub const A5_INDEX: &str = "1.0";
 pub const FORMAT_VERSION: u32 = 2;
 /// The version of a single pyramid file, whose finest level is the leaves.
 pub(crate) const SINGLE_FILE_VERSION: u32 = 1;
+/// The version of a shard of a set and of a set's index: fixed, so a later
+/// version of the format does not make readers of this one refuse them.
+pub(crate) const SHARD_FILE_VERSION: u32 = 2;
 
 /// The index: what the levels are, which tiles hold each, and what area
 /// each tile covers. A tile is one row group of a Parquet file and one

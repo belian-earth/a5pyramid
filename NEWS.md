@@ -9,8 +9,10 @@
   built from all the leaves before the split. `a5_pyramid_set_tiers()`
   gives the default tiers (three LODs a tier, shards 12 resolutions coarser
   than the tier's finest LOD, so a view meets a few shards at any zoom),
-  and `a5_pyramid_set_info()` reads the index. In the crate:
-  `write_set()`, `SetMeta`, `Tier` and `default_tiers()`.
+  and `a5_pyramid_set_info()` reads the index. A write that fails or is
+  interrupted removes what it wrote, so it can be run again into the same
+  directory. In the crate: `write_set()`, `SetMeta`, `Tier` and
+  `default_tiers()`.
 * Format version 2 (`FORMAT.md`, "Pyramid sets"): shards are a5pyramid
   files whose index records the `shard` (tier, shard cell, resolution),
   whose finest level need not be the leaves, and whose `bbox` covers every
