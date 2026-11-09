@@ -35,7 +35,9 @@ passing through R, so a \code{Dataset} over Parquet files (from
 so a set never mixes with another's files.}
 
 \item{...}{<\code{\link[tidyselect:language]{tidy-select}}> Value columns to carry
-into the pyramid. Default: every numeric column other than the cells.}
+into the pyramid. Default: every numeric column other than the cells.
+For an Arrow \code{Dataset} that includes its partitioning columns, such as
+\code{year} from \verb{year=2025/} directories, so name the value columns there.}
 
 \item{lods}{Integer vector of the coarser LODs to build. Default: every
 LOD the \code{tiers} hold below the leaves, or, without \code{tiers}, every
@@ -63,7 +65,8 @@ such as \code{c(red = "uint8", ndvi = "float32")}. See "Column types".}
 
 \item{rep_sd}{Named numeric vector of standard deviations for
 \code{"rep_child"} columns, such as \code{c(red = 60, green = 60)}. Default \code{NULL}:
-each column's standard deviation over the leaves. That depends on
+each column's standard deviation over the leaves, or 1 where that is 0
+or undefined (a constant column). That depends on
 every leaf, so pyramids built from different parts of a region choose
 representatives differently even where their cells are the same; fix
 the standard deviations (from a whole-region build's

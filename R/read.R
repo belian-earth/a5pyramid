@@ -20,7 +20,8 @@
 #'   - `bbox`: `c(xmin, ymin, xmax, ymax)` of the leaves.
 #'   - `columns`: a tibble of the value columns' `name`, `type`,
 #'     `reducer` and `sd`, the standard deviation that scaled a
-#'     `"rep_child"` column (`NA` for other reducers and older files).
+#'     `"rep_child"` column (1 where the leaves' standard deviation is 0 or
+#'     undefined; `NA` for other reducers and older files).
 #'   - `levels`: a tibble of each level's `lod`, `rows` and number of
 #'     `tiles`.
 #'   - `tiles`: a tibble with one row per tile, which is one row group of

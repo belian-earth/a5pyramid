@@ -19,7 +19,8 @@ A list of class \code{a5pyramid_set_info}:
 \item \code{bbox}: \code{c(xmin, ymin, xmax, ymax)} of every shard.
 \item \code{columns}: a tibble of the value columns' \code{name}, \code{type},
 \code{reducer} and \code{sd}, the standard deviation that scaled a
-\code{"rep_child"} column (\code{NA} for other reducers and older files).
+\code{"rep_child"} column (1 where the leaves' standard deviation is 0 or
+undefined; \code{NA} for other reducers and older files).
 \item \code{tiers}: a tibble with one row per tier: \code{tier} (from 0), \code{lod_min},
 \code{lod_max}, \code{shard_resolution}, \code{tile_size}, and its \code{shards}, \code{rows}
 and \code{bytes}.

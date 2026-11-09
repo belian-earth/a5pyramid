@@ -154,10 +154,11 @@ pub struct ColumnSpec {
     pub reducer: Reducer,
     /// For a `RepChild` column, the standard deviation that scales it in the
     /// distance to a cell's mean. In the leaves, `None` computes it over
-    /// the leaves, and a value fixes it: builds of separate parts of a
-    /// region that share it choose a cell's representative from its own
-    /// leaves alone. In a built pyramid, the value used. Always `None` for
-    /// other reducers.
+    /// the leaves (1 where that is 0 or undefined, as for a constant
+    /// column), and a value fixes it: builds of separate parts of a region
+    /// that share it choose a cell's representative from its own leaves
+    /// alone. In a built pyramid, the value used. Always `None` for other
+    /// reducers.
     pub sd: Option<f64>,
 }
 

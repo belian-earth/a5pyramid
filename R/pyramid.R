@@ -58,6 +58,8 @@
 #'   [arrow::open_dataset()]) builds without R holding the leaves.
 #' @param ... <[`tidy-select`][tidyselect::language]> Value columns to carry
 #'   into the pyramid. Default: every numeric column other than the cells.
+#'   For an Arrow `Dataset` that includes its partitioning columns, such as
+#'   `year` from `year=2025/` directories, so name the value columns there.
 #' @param lods Integer vector of the coarser LODs to build, each below the
 #'   leaves' resolution; the leaves are always kept. Default: every
 #'   resolution from 2 up to the leaves'. Resolutions 0 and 1 hold the 12
@@ -74,7 +76,8 @@
 #'   such as `c(red = "uint8", ndvi = "float32")`. See "Column types".
 #' @param rep_sd Named numeric vector of standard deviations for
 #'   `"rep_child"` columns, such as `c(red = 60, green = 60)`. Default `NULL`:
-#'   each column's standard deviation over the leaves. That depends on
+#'   each column's standard deviation over the leaves, or 1 where that is 0
+#'   or undefined (a constant column). That depends on
 #'   every leaf, so pyramids built from different parts of a region choose
 #'   representatives differently even where their cells are the same; fix
 #'   the standard deviations (from a whole-region build's
