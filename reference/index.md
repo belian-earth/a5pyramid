@@ -2,10 +2,13 @@
 
 ## Building pyramids
 
-Aggregate A5 cells to coarser levels of detail, in memory or to Parquet.
+Aggregate A5 cells to coarser levels of detail, as a tibble, an Arrow
+table or a Parquet file.
 
 - [`a5_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid.md)
   : Build a level-of-detail pyramid of A5 cells
+- [`a5_pyramid_arrow()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_arrow.md)
+  : Build a level-of-detail pyramid as an Arrow table
 - [`a5_write_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid.md)
   : Write a level-of-detail pyramid of A5 cells to Parquet
 

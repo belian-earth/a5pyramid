@@ -31,19 +31,20 @@ A list of class `a5pyramid_info`:
 - `data_resolution`: the leaves' resolution. `lods`: every level's LOD,
   ascending, the leaves last.
 
-- `tile_size`: the most rows in a row group.
+- `tile_size`: the most rows in a tile.
 
 - `bbox`: `c(xmin, ymin, xmax, ymax)` of the leaves.
 
 - `columns`: a tibble of the value columns' `name`, `type` and
   `reducer`.
 
-- `levels`: a tibble of each level's `lod`, `rows` and `row_groups`.
+- `levels`: a tibble of each level's `lod`, `rows` and number of
+  `tiles`.
 
-- `row_groups`: a tibble with one row per row group: `row_group` (its
-  0-based index in the file, as Parquet readers count), `lod`, `rows`,
-  `bytes` (compressed size, what a reader fetches) and `xmin`, `ymin`,
-  `xmax`, `ymax`.
+- `tiles`: a tibble with one row per tile, which is one row group of the
+  file: `tile` (its 0-based index, the row group's index as Parquet
+  readers count), `lod`, `rows`, `bytes` (compressed size, what a reader
+  fetches) and `xmin`, `ymin`, `xmax`, `ymax`.
 
 - `metadata`: the file's other key-value metadata, a named character
   vector.
@@ -72,32 +73,32 @@ a5_write_pyramid(data.frame(cell = cells, value = runif(length(cells))), path)
 
 info <- a5_pyramid_info(path)
 info
-#> ── a5pyramid file file2c4171151dff.parquet ─────────────────────────────────────
-#> Size: 17.2 KB (footer 4.7 KB)
+#> ── a5pyramid file file2cec41a16853.parquet ─────────────────────────────────────
+#> Size: 17.1 KB (footer 4.6 KB)
 #> A5 index: 1.0
 #> Leaves: resolution 15, 1,024 cells
 #> LODs: 2-15 (14 levels)
 #> Rows: 1,426
-#> Row groups: 14 (tile size 4096)
+#> Tiles: 14 row groups (tile size 4096)
 #> Columns: value <float64, mean>
 #> Bbox: -3.2194, 55.9355, -3.127, 56.0338
 #> Written by: a5pyramid 0.0.0.9000, a5 crate 1.0.0
 info$levels
 #> # A tibble: 14 × 3
-#>      lod  rows row_groups
-#>    <int> <dbl>      <int>
-#>  1     2     1          1
-#>  2     3     1          1
-#>  3     4     1          1
-#>  4     5     1          1
-#>  5     6     2          1
-#>  6     7     2          1
-#>  7     8     2          1
-#>  8     9     3          1
-#>  9    10     4          1
-#> 10    11     7          1
-#> 11    12    22          1
-#> 12    13    76          1
-#> 13    14   280          1
-#> 14    15  1024          1
+#>      lod  rows tiles
+#>    <int> <dbl> <int>
+#>  1     2     1     1
+#>  2     3     1     1
+#>  3     4     1     1
+#>  4     5     1     1
+#>  5     6     2     1
+#>  6     7     2     1
+#>  7     8     2     1
+#>  8     9     3     1
+#>  9    10     4     1
+#> 10    11     7     1
+#> 11    12    22     1
+#> 12    13    76     1
+#> 13    14   280     1
+#> 14    15  1024     1
 ```

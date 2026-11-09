@@ -17,10 +17,10 @@ published on its own.
 
 |  |  |
 |----|----|
-| Build | [`a5_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid.md) builds the levels as a tibble; [`a5_write_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid.md) builds and writes them to Parquet in Rust, in parallel |
+| Build | [`a5_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid.md) builds the levels as a tibble; [`a5_write_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid.md) builds and writes them to Parquet in Rust, in parallel; [`a5_pyramid_arrow()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_arrow.md) returns the same tiles in memory as an Arrow table, without a file |
 | Reduce | mean, sum, min, max, mode, or a representative leaf that keeps real combinations of values such as colours |
 | Read | [`a5_pyramid_info()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_info.md) reads the index from the footer; [`a5_read_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_read_pyramid.md) reads levels within a bounding box, as a renderer does |
-| Format | One row group per tile, with each tile’s level and bounding box indexed in the file’s metadata; specified in [`FORMAT.md`](https://belian-earth.github.io/a5pyramid/src/rust/a5pyramid/FORMAT.md) |
+| Format | One tile per Parquet row group (or Arrow record batch), with each tile’s level and bounding box indexed in the metadata; specified in [`FORMAT.md`](https://belian-earth.github.io/a5pyramid/src/rust/a5pyramid/FORMAT.md) |
 
 ## Installation
 
@@ -62,13 +62,13 @@ a5_write_pyramid(
 ``` r
 
 a5_pyramid_info(path)
-#> ── a5pyramid file 'file2fd74b22e0918a.parquet' ─────────────────────────────────
-#> Size: 380.3 KB (footer 10.8 KB)
+#> ── a5pyramid file 'file2b25b31ec7da4.parquet' ──────────────────────────────────
+#> Size: 380.2 KB (footer 10.7 KB)
 #> A5 index: 1.0
 #> Leaves: resolution 18, 15,626 cells
 #> LODs: 2-18 (17 levels)
 #> Rows: 21,077
-#> Row groups: 22 (tile size 4096)
+#> Tiles: 22 row groups (tile size 4096)
 #> Columns: B02 <uint16, rep_child>, B03 <uint16, rep_child>, B04 <uint16,
 #> rep_child>, B08 <uint16, rep_child>, ndvi <float32, mean>
 #> Bbox: -70.6722, -33.4801, -70.6418, -33.4549
@@ -112,13 +112,12 @@ more cells than fit a tile, so tiles are coarse where data is sparse and
 fine where it is dense, and every level stays sorted by cell id.
 
 **Index.** The file’s key-value metadata holds a JSON index of the
-levels, the value columns, and the bounding box of every row group,
-computed from the cells’ boundaries (antimeridian and poles included).
-Cell ids are delta encoded, which takes them from 8 bytes per row to
-about 3, and Snappy compression keeps the file readable by hyparquet
-with no extra libraries. The test suite reads files with hyparquet under
-Node and checks that only the footer and the requested row group are
-fetched.
+levels, the value columns, and the bounding box of every tile, computed
+from the cells’ boundaries (antimeridian and poles included). Cell ids
+are delta encoded, which takes them from 8 bytes per row to about 3, and
+Snappy compression keeps the file readable by hyparquet with no extra
+libraries. The test suite reads files with hyparquet under Node and
+checks that only the footer and the requested tile are fetched.
 
 ## Performance
 
@@ -143,10 +142,13 @@ sets.
 
 ## Building pyramids
 
-Aggregate A5 cells to coarser levels of detail, in memory or to Parquet.
+Aggregate A5 cells to coarser levels of detail, as a tibble, an Arrow
+table or a Parquet file.
 
 - [`a5_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid.md)
   : Build a level-of-detail pyramid of A5 cells
+- [`a5_pyramid_arrow()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_arrow.md)
+  : Build a level-of-detail pyramid as an Arrow table
 - [`a5_write_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid.md)
   : Write a level-of-detail pyramid of A5 cells to Parquet
 

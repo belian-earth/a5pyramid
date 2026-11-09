@@ -143,7 +143,9 @@ stored values. For a browser, `"uint8"` suits colour channels and
 ## See also
 
 [`a5_write_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid.md)
-to write the pyramid for a browser.
+to write the pyramid for a browser,
+[`a5_pyramid_arrow()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_arrow.md)
+for the same tiles as an Arrow table.
 
 ## Examples
 

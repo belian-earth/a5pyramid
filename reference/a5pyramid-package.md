@@ -17,6 +17,10 @@ crate with no R dependency, built to be published on its own.
 - [`a5_write_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid.md):
   build the levels and write them to Parquet, in Rust from end to end.
 
+- [`a5_pyramid_arrow()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_arrow.md):
+  build the levels and return the tiles of the Parquet layout in memory,
+  as an Arrow table, without a file.
+
 Each coarser level groups the leaves by the coarse cell containing their
 centres
 ([`a5R::a5_cell_to_supercell()`](https://belian-earth.github.io/a5R/reference/a5_spatial_hierarchy.html))

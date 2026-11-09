@@ -120,10 +120,10 @@ cell id.
 
 The file's key-value metadata holds a JSON index under `"a5pyramid"`:
 the leaves' resolution, the value columns with their types and reducers,
-each level's LOD, row count and row groups, and the bounding box of each
-row group, computed from its cells' boundaries. A reader fetches the
-footer, picks the level for the zoom and the row groups whose boxes meet
-the view, and decodes only those. `"a5_index"` records the A5 index
+each level's LOD, row count and tiles, and the bounding box of each
+tile, computed from its cells' boundaries. A reader fetches the footer,
+picks the level for the zoom and the tiles whose boxes meet the view,
+and decodes only those row groups. `"a5_index"` records the A5 index
 version of the ids, `"1.0"`, as across the a5R stack.
 
 The columns are `cell` (`uint64`), `lod` (`uint8`), `ncell` (`uint32`)
@@ -139,7 +139,9 @@ format is specified in `FORMAT.md` in the package source
 [`a5_pyramid_info()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_info.md)
 to inspect the file,
 [`a5_read_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_read_pyramid.md)
-to read levels back.
+to read levels back,
+[`a5_pyramid_arrow()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_arrow.md)
+for the same tiles in memory.
 
 ## Examples
 
@@ -152,13 +154,13 @@ x <- data.frame(cell = cells, value = runif(length(cells)))
 path <- tempfile(fileext = ".parquet")
 a5_write_pyramid(x, path, types = c(value = "float32"), tile_size = 1000)
 a5_pyramid_info(path)
-#> ── a5pyramid file file2c414e7dc3f8.parquet ─────────────────────────────────────
-#> Size: 13.3 KB (footer 4.9 KB)
+#> ── a5pyramid file file2cec3baa8222.parquet ─────────────────────────────────────
+#> Size: 13.2 KB (footer 4.8 KB)
 #> A5 index: 1.0
 #> Leaves: resolution 15, 1,024 cells
 #> LODs: 2-15 (14 levels)
 #> Rows: 1,426
-#> Row groups: 15 (tile size 1000)
+#> Tiles: 15 row groups (tile size 1000)
 #> Columns: value <float32, mean>
 #> Bbox: -3.2194, 55.9355, -3.127, 56.0338
 #> Written by: a5pyramid 0.0.0.9000, a5 crate 1.0.0
