@@ -83,8 +83,9 @@ pooled: the sample standard deviation (n − 1) about the elements' grand
 mean, or 1 where it is 0 or undefined. When the vector is a pyramid's only
 `rep_child` input, its `sd` scales every term of the distance alike and
 cannot change a cell's representative, so builds of separate parts of a
-region agree without fixing it; with scalar `rep_child` columns beside it,
-fix the `sd`s as for any `rep_child` column.
+region need not fix it (cells at the seams still differ, as their leaves
+do); with scalar `rep_child` columns beside it, fix the `sd`s as for any
+`rep_child` column.
 
 ## Tiles
 
