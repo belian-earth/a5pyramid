@@ -14,17 +14,22 @@ a5_write_pyramid_set(
   reducers = NULL,
   weights = NULL,
   types = NULL,
+  rep_sd = NULL,
   compression = c("snappy", "zstd", "none"),
   metadata = NULL,
   threads = NULL
 )
 }
 \arguments{
-\item{x}{A data frame with one \link[a5R:a5_cell]{a5R::a5_cell} column, or an
-\link[a5R:a5_cell]{a5R::a5_cell} vector. The cells must share one resolution and appear
-once each; rows with \code{NA} cells are dropped. An \link[a5R:a5_covering]{a5R::a5_covering}
-holds cells at mixed resolutions: convert it with
-\code{\link[a5R:a5_uncompact]{a5R::a5_uncompact()}} first.}
+\item{x}{A data frame with one \link[a5R:a5_cell]{a5R::a5_cell} column, an \link[a5R:a5_cell]{a5R::a5_cell}
+vector, or Arrow data with one \code{uint64} column of cells: an Arrow
+\code{Table}, \code{RecordBatch}, \code{RecordBatchReader}, \code{Dataset} or query from the
+arrow package. The cells must share one resolution and appear once
+each; rows with \code{NA} cells are dropped. An \link[a5R:a5_covering]{a5R::a5_covering} holds
+cells at mixed resolutions: convert it with \code{\link[a5R:a5_uncompact]{a5R::a5_uncompact()}}
+first. Arrow data is read into the engine batch by batch without
+passing through R, so a \code{Dataset} over Parquet files (from
+\code{\link[arrow:open_dataset]{arrow::open_dataset()}}) builds without R holding the leaves.}
 
 \item{dest}{Directory to write the set to. It must not exist or be empty,
 so a set never mixes with another's files.}
@@ -55,6 +60,15 @@ weight 0 do not count. Default \code{NULL}: every leaf counts once.}
 
 \item{types}{Named character vector of storage types for single columns,
 such as \code{c(red = "uint8", ndvi = "float32")}. See "Column types".}
+
+\item{rep_sd}{Named numeric vector of standard deviations for
+\code{"rep_child"} columns, such as \code{c(red = 60, green = 60)}. Default \code{NULL}:
+each column's standard deviation over the leaves. That depends on
+every leaf, so pyramids built from different parts of a region choose
+representatives differently even where their cells are the same; fix
+the standard deviations (from a whole-region build's
+\code{a5_pyramid_info()$columns$sd}, say) for builds whose cells must
+agree.}
 
 \item{compression}{\code{"snappy"} (default), \code{"zstd"} or \code{"none"}. hyparquet
 decodes snappy itself; zstd needs the \code{hyparquet-compressors} package

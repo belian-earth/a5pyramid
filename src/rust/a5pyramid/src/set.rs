@@ -293,11 +293,11 @@ fn write_shards(
             .filter(|l| l.as_ref().is_some_and(|l| tier.holds(l.lod)))
             .filter_map(Option::take)
             .collect();
-        // (shard cell, row) for every row of each level, in that order, so
-        // a shard's rows come out in ascending cell order, as tiling needs
-        let owners: Vec<Vec<(u64, u32)>> = tier_levels
+        // each level's rows by shard, each shard's in ascending cell order,
+        // as tiling needs
+        let owners: Vec<Owners> = tier_levels
             .iter()
-            .map(|l| owner_rows(l, tier.shard_resolution))
+            .map(|l| Owners::new(l, tier.shard_resolution))
             .collect::<Result<_>>()?;
         cancel.check()?;
         let cells = shard_cells(&owners);
@@ -307,19 +307,12 @@ fn write_shards(
             std::fs::create_dir(&tier_dir)?;
             written.dirs.push(tier_dir);
         }
-        // every level's rows are consumed shard by shard, in shard order
-        let mut next = vec![0usize; tier_levels.len()];
         for &cell in &cells {
             cancel.check()?;
             let shard_levels: Vec<Level> = tier_levels
                 .iter()
                 .zip(&owners)
-                .zip(next.iter_mut())
-                .map(|((level, rows), at)| {
-                    let start = *at;
-                    *at = start + rows[start..].partition_point(|&(s, _)| s <= cell);
-                    gather(level, &rows[start..*at])
-                })
+                .map(|(level, o)| gather(level, o.rows_of(cell)))
                 .collect();
             let shard = ShardMeta {
                 tier: t,
@@ -390,20 +383,9 @@ fn write_shards(
     Ok(meta)
 }
 
-/// The shard cells owning rows of a tier, ascending: each level's owners are
-/// sorted, so a scan finds its few distinct cells without sorting every row
-/// again.
-fn shard_cells(owners: &[Vec<(u64, u32)>]) -> Vec<u64> {
-    let mut cells = Vec::new();
-    for rows in owners {
-        let mut last = None;
-        for &(s, _) in rows {
-            if last != Some(s) {
-                cells.push(s);
-                last = Some(s);
-            }
-        }
-    }
+/// The shard cells owning rows of any of a tier's levels, ascending.
+fn shard_cells(owners: &[Owners]) -> Vec<u64> {
+    let mut cells: Vec<u64> = owners.iter().flat_map(|o| o.shards.iter().copied()).collect();
     cells.sort_unstable();
     cells.dedup();
     cells
@@ -479,22 +461,83 @@ fn prepare_dir(dir: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// Each row's shard cell with the row, sorted.
-fn owner_rows(level: &Level, shard_resolution: i32) -> Result<Vec<(u64, u32)>> {
-    let mut rows: Vec<(u64, u32)> = level
-        .cells
-        .par_iter()
-        .enumerate()
-        .map(|(i, &c)| a5::cell_to_supercell(c, shard_resolution).map(|s| (s, i as u32)))
-        .collect::<std::result::Result<_, String>>()
-        .map_err(Error::A5)?;
-    rows.par_sort_unstable();
-    Ok(rows)
+/// A level's rows grouped by the shard owning each: shard `k` of `shards`
+/// (ascending) owns `rows[offsets[k]..offsets[k + 1]]`, in ascending row
+/// order, which is ascending cell order.
+struct Owners {
+    shards: Vec<u64>,
+    offsets: Vec<usize>,
+    rows: Vec<u32>,
+}
+
+impl Owners {
+    /// Groups the rows by a stable counting sort on the shard's place in
+    /// `shards`, holding 4 bytes a row (8 while sorting). The supercells
+    /// are computed twice, once to find the few shards and once to place
+    /// each row, rather than kept.
+    fn new(level: &Level, shard_resolution: i32) -> Result<Self> {
+        let cells = &level.cells;
+        let shard = |c: u64| a5::cell_to_supercell(c, shard_resolution);
+        // rows are in ascending cell order, so a chunk's shards come in runs
+        let runs: Vec<Vec<u64>> = cells
+            .par_chunks(1 << 16)
+            .map(|chunk| {
+                let mut out: Vec<u64> = Vec::new();
+                for &c in chunk {
+                    let s = shard(c)?;
+                    if out.last() != Some(&s) {
+                        out.push(s);
+                    }
+                }
+                Ok(out)
+            })
+            .collect::<std::result::Result<_, String>>()
+            .map_err(Error::A5)?;
+        let mut shards: Vec<u64> = runs.into_iter().flatten().collect();
+        shards.sort_unstable();
+        shards.dedup();
+        if shards.len() > u32::MAX as usize {
+            return Err(invalid("more shards than a set can index"));
+        }
+
+        let mut key = vec![0u32; cells.len()];
+        key.par_iter_mut()
+            .zip(cells.par_iter())
+            .try_for_each(|(k, &c)| {
+                let s = shard(c)?;
+                *k = shards.binary_search(&s).map_err(|_| "a shard was missed".to_string())? as u32;
+                Ok::<(), String>(())
+            })
+            .map_err(Error::A5)?;
+        let mut offsets = vec![0usize; shards.len() + 1];
+        for &k in &key {
+            offsets[k as usize + 1] += 1;
+        }
+        for k in 1..offsets.len() {
+            offsets[k] += offsets[k - 1];
+        }
+        let mut next = offsets[..shards.len()].to_vec();
+        let mut rows = vec![0u32; cells.len()];
+        for (i, &k) in key.iter().enumerate() {
+            let at = &mut next[k as usize];
+            rows[*at] = i as u32;
+            *at += 1;
+        }
+        Ok(Self { shards, offsets, rows })
+    }
+
+    /// The rows `shard` owns, ascending (none when it owns no row here).
+    fn rows_of(&self, shard: u64) -> &[u32] {
+        match self.shards.binary_search(&shard) {
+            Ok(k) => &self.rows[self.offsets[k]..self.offsets[k + 1]],
+            Err(_) => &[],
+        }
+    }
 }
 
 /// The rows `rows` of `level`, in order.
-fn gather(level: &Level, rows: &[(u64, u32)]) -> Level {
-    let pick = |i: &(u64, u32)| i.1 as usize;
+fn gather(level: &Level, rows: &[u32]) -> Level {
+    let pick = |i: &u32| *i as usize;
     Level {
         lod: level.lod,
         cells: rows.par_iter().map(|r| level.cells[pick(r)]).collect(),
@@ -809,13 +852,33 @@ mod tests {
     }
 
     #[test]
-    fn shard_cells_are_the_distinct_owners() {
-        let owners = vec![
-            vec![(5, 0), (5, 1), (9, 2)],
-            vec![],
-            vec![(1, 0), (9, 1), (9, 2), (12, 3)],
-        ];
-        assert_eq!(shard_cells(&owners), vec![1, 5, 9, 12]);
+    fn owners_group_each_level_by_shard_in_cell_order() {
+        let p = pyramid();
+        for level in &p.levels {
+            for res in [0, 2, 4] {
+                if res > level.lod {
+                    continue;
+                }
+                let o = Owners::new(level, res).unwrap();
+                let mut seen = 0;
+                for &s in &o.shards {
+                    let rows = o.rows_of(s);
+                    assert!(!rows.is_empty() && rows.windows(2).all(|w| w[0] < w[1]));
+                    for &i in rows {
+                        assert_eq!(a5::cell_to_supercell(level.cells[i as usize], res).unwrap(), s);
+                    }
+                    seen += rows.len();
+                }
+                assert_eq!(seen, level.len());
+                assert!(o.shards.windows(2).all(|w| w[0] < w[1]));
+                assert!(o.rows_of(0).is_empty());
+            }
+        }
+        let owners: Vec<Owners> = p.levels.iter().map(|l| Owners::new(l, 0).unwrap()).collect();
+        let mut want: Vec<u64> = owners.iter().flat_map(|o| o.shards.clone()).collect();
+        want.sort_unstable();
+        want.dedup();
+        assert_eq!(shard_cells(&owners), want);
     }
 
     #[test]

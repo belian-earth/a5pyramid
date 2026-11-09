@@ -131,7 +131,7 @@ The index of a small file (1,024 leaves at resolution 15, levels at 11 and
 | `data_resolution` | The leaves' resolution. In a single file it is the finest level's `lod`; a shard of a tier coarser than the leaves holds no level at it. |
 | `tile_size` | The most rows in a tile. |
 | `bbox` | `[west, south, east, north]` (see "Boxes"): in a single file, of the leaves; in a shard, of every tile, since coarse cells reach past the leaves under them. |
-| `columns` | The value columns in column order: `name`, storage `type` and `reducer` (see "Levels"). |
+| `columns` | The value columns in column order: `name`, storage `type` and `reducer` (see "Levels"), and for a `rep_child` column `sd`, the standard deviation that scaled it. `sd` is optional (absent before 2026-11-09), and readers that do not choose representatives ignore it. |
 | `levels` | One entry per level, ascending `lod`: its `lod`, its number of `rows`, and the half-open range `[start, end)` of its tiles. Consecutive levels' ranges meet, and together cover every tile. |
 | `tile_bbox` | The box of every tile in order, flat: tile `i` is at indices `4i` to `4i + 3`. |
 | `shard` | Shards only (version 2): `{"tier", "cell", "resolution"}`, the shard's tier, its shard cell as 16 hex digits, and that cell's resolution. Absent in a single file. |
@@ -171,7 +171,12 @@ Each value column is reduced over the leaves under each cell by its
 | `mean` | The mean, weighted by the leaves' weights when the writer had them. |
 | `sum`, `min`, `max` | The sum, minimum or maximum. |
 | `mode` | The most frequent value (by total weight), ties to the smallest. |
-| `rep_child` | The value of one *representative* leaf, the same leaf for every `rep_child` column: the leaf closest to the cell's mean over all `rep_child` columns, each scaled by its standard deviation over the leaves. Ties go to the lowest cell id. |
+| `rep_child` | The value of one *representative* leaf, the same leaf for every `rep_child` column: the leaf closest to the cell's mean over all `rep_child` columns, each divided by its standard deviation (the column's `sd`: over the leaves, or fixed by the writer). Ties go to the lowest cell id. |
+
+With `sd` computed over the leaves, a cell's representative depends on every
+leaf of the build, so pyramids of different parts of a region can choose
+differently for the same cell. Builds that must agree, such as parts of a
+region built one at a time, fix `sd` to the same values.
 
 Missing values are skipped; a cell whose leaves are all missing has a null
 value. Values are stored as their column's type at every level: integer types

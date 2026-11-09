@@ -77,6 +77,7 @@ pub(crate) fn column_meta(columns: &[crate::ColumnSpec]) -> Vec<ColumnMeta> {
             name: c.name.clone(),
             ty: c.ty.as_str().to_string(),
             reducer: c.reducer.as_str().to_string(),
+            sd: c.sd,
         })
         .collect()
 }
@@ -88,6 +89,11 @@ pub struct ColumnMeta {
     #[serde(rename = "type")]
     pub ty: String,
     pub reducer: String,
+    /// For a `rep_child` column, the standard deviation that scaled it in
+    /// the choice of representatives ([`crate::ColumnSpec::sd`]); absent for
+    /// other reducers and in files written before 2026-11-09.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sd: Option<f64>,
 }
 
 /// A level: its LOD (A5 resolution), row count, and the half-open range

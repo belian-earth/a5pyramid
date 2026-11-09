@@ -20,8 +20,9 @@ the file) and \code{a5_index} (the A5 index version of its ids).
 LOD, ascending, the leaves last.
 \item \code{tile_size}: the most rows in a tile.
 \item \code{bbox}: \code{c(xmin, ymin, xmax, ymax)} of the leaves.
-\item \code{columns}: a tibble of the value columns' \code{name}, \code{type} and
-\code{reducer}.
+\item \code{columns}: a tibble of the value columns' \code{name}, \code{type},
+\code{reducer} and \code{sd}, the standard deviation that scaled a
+\code{"rep_child"} column (\code{NA} for other reducers and older files).
 \item \code{levels}: a tibble of each level's \code{lod}, \code{rows} and number of
 \code{tiles}.
 \item \code{tiles}: a tibble with one row per tile, which is one row group of

@@ -18,8 +18,9 @@
 #'     LOD, ascending, the leaves last.
 #'   - `tile_size`: the most rows in a tile.
 #'   - `bbox`: `c(xmin, ymin, xmax, ymax)` of the leaves.
-#'   - `columns`: a tibble of the value columns' `name`, `type` and
-#'     `reducer`.
+#'   - `columns`: a tibble of the value columns' `name`, `type`,
+#'     `reducer` and `sd`, the standard deviation that scaled a
+#'     `"rep_child"` column (`NA` for other reducers and older files).
 #'   - `levels`: a tibble of each level's `lod`, `rows` and number of
 #'     `tiles`.
 #'   - `tiles`: a tibble with one row per tile, which is one row group of

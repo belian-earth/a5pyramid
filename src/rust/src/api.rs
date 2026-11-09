@@ -5,18 +5,18 @@ use arrow_array::cast::AsArray;
 use arrow_array::types::{
     Float32Type, Float64Type, Int16Type, Int32Type, Int8Type, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
-use arrow_array::{Array, RecordBatch};
+use arrow_array::{Array, RecordBatch, RecordBatchReader};
 use arrow_schema::DataType;
 use extendr_api::prelude::*;
 
 use a5pyramid::{
-    build, default_tiers, write_parquet, write_set, Bbox, Column, ColumnType, Compression, Leaves, ParquetOptions,
-    Pyramid, PyramidFile, Reducer, SetMeta, SetOptions, ShardEntry, Tier, TileOptions, TiledPyramid,
+    build, default_tiers, write_parquet, write_set, Bbox, Column, ColumnSpec, ColumnType, Compression, Leaves,
+    ParquetOptions, Pyramid, PyramidFile, Reducer, SetMeta, SetOptions, ShardEntry, Tier, TileOptions, TiledPyramid,
 };
-use arrow_array::ffi_stream::FFI_ArrowArrayStream;
+use arrow_array::ffi_stream::{FFI_ArrowArrayStream, RecordBatchStreamReader};
 
 use crate::a5r_api::{cells_from_u64, cells_to_u64};
-use crate::run::{available_cpus, r_error, run};
+use crate::run::{available_cpus, interrupt_pending, r_error, run};
 
 type Result<T> = extendr_api::Result<T>;
 
@@ -57,6 +57,7 @@ fn leaves_from_r(
     types: &[String],
     reducers: &[String],
     weights: &Robj,
+    sd: &[f64],
 ) -> Result<Leaves> {
     let (ids, na) = cells_to_u64(cells)?;
     let n = ids.len();
@@ -65,11 +66,10 @@ fn leaves_from_r(
         None => ids,
         Some(k) => ids.into_iter().zip(k).filter(|(_, &k)| k).map(|(c, _)| c).collect(),
     };
-    if values.len() != names.len() || names.len() != types.len() || types.len() != reducers.len() {
-        return Err(other(
-            "internal error: value columns, names, types and reducers differ in length",
-        ));
+    if values.len() != names.len() {
+        return Err(other("internal error: value columns and names differ in length"));
     }
+    let specs = column_specs(names, types, reducers, sd)?;
     let mut columns = Vec::with_capacity(values.len());
     for (k, (_, col)) in values.iter().enumerate() {
         let v = r_numeric(&col, &format!("column `{}`", names[k]))?;
@@ -80,9 +80,10 @@ fn leaves_from_r(
                 v.len()
             )));
         }
-        let ty = ColumnType::parse(&types[k]).map_err(r_error)?;
-        let reducer = Reducer::parse(&reducers[k]).map_err(r_error)?;
-        columns.push(Column::new(names[k].clone(), ty, reducer, filter(v, keep.as_deref())));
+        columns.push(Column {
+            spec: specs[k].clone(),
+            values: filter(v, keep.as_deref()),
+        });
     }
     let weights = if weights.is_null() {
         None
@@ -98,6 +99,200 @@ fn leaves_from_r(
         columns,
         weights,
     })
+}
+
+/// The value columns' specs, from R's names, types, reducers and standard
+/// deviations (NA where not given).
+fn column_specs(names: &[String], types: &[String], reducers: &[String], sd: &[f64]) -> Result<Vec<ColumnSpec>> {
+    if names.len() != types.len() || types.len() != reducers.len() || reducers.len() != sd.len() {
+        return Err(other(
+            "internal error: names, types, reducers and standard deviations differ in length",
+        ));
+    }
+    (0..names.len())
+        .map(|k| {
+            Ok(ColumnSpec {
+                name: names[k].clone(),
+                ty: ColumnType::parse(&types[k]).map_err(r_error)?,
+                reducer: Reducer::parse(&reducers[k]).map_err(r_error)?,
+                sd: (!sd[k].is_nan()).then_some(sd[k]),
+            })
+        })
+        .collect()
+}
+
+/// Leaves converted for a build, owned by R until a build takes them.
+struct LeavesSlot(Option<Leaves>);
+
+fn leaves_handle(leaves: Leaves) -> Robj {
+    ExternalPtr::new(LeavesSlot(Some(leaves))).into()
+}
+
+/// The leaves in a handle from `a5pyramid_leaves_rs()` or
+/// `a5pyramid_leaves_arrow_rs()`, moved out: a handle builds once.
+fn take_leaves(handle: &Robj) -> Result<Leaves> {
+    let mut slot: ExternalPtr<LeavesSlot> = handle.try_into()?;
+    slot.0
+        .take()
+        .ok_or_else(|| other("internal error: these leaves were already built"))
+}
+
+/// Convert leaves from R vectors (see `leaves_from_r()`) into a handle for a
+/// build.
+/// @noRd
+/// @keywords internal
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+fn a5pyramid_leaves_rs(
+    cells: Robj,
+    values: List,
+    names: Vec<String>,
+    types: Vec<String>,
+    reducers: Vec<String>,
+    weights: Robj,
+    sd: Vec<f64>,
+) -> Result<Robj> {
+    Ok(leaves_handle(leaves_from_r(
+        &cells, &values, &names, &types, &reducers, &weights, &sd,
+    )?))
+}
+
+/// The number of leaves in a handle and the resolution of the first (NA
+/// when there are none).
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5pyramid_leaves_info_rs(handle: Robj) -> Result<Robj> {
+    let slot: ExternalPtr<LeavesSlot> = (&handle).try_into()?;
+    let leaves = slot
+        .0
+        .as_ref()
+        .ok_or_else(|| other("internal error: these leaves were already built"))?;
+    let resolution = match leaves.cells.first() {
+        Some(&c) => Robj::from(a5::get_resolution(c)),
+        None => Robj::from(Rint::na()),
+    };
+    Ok(list!(n = leaves.cells.len() as f64, resolution = resolution).into())
+}
+
+/// An empty Arrow C stream for the arrow package to export a reader into:
+/// `holder` owns it, `address` is its address as a decimal string.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5pyramid_stream_slot_rs() -> Robj {
+    let slot = StreamSlot(Box::new(FFI_ArrowArrayStream::empty()));
+    let address = (slot.0.as_ref() as *const FFI_ArrowArrayStream as usize).to_string();
+    let holder: Robj = ExternalPtr::new(slot).into();
+    list!(holder = holder, address = address).into()
+}
+
+/// Read leaves from the Arrow C stream in `holder` (from
+/// `a5pyramid_stream_slot_rs()`, filled by arrow) into a handle for a build:
+/// the uint64 column `cell` (rows with null cells dropped), the value
+/// columns `names` as f64 (null as missing), and the weights column
+/// `weights` (`""` for none). Batches are read one at a time, so the input
+/// is never held twice; an interrupt between batches stops the read.
+/// @noRd
+/// @keywords internal
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+fn a5pyramid_leaves_arrow_rs(
+    holder: Robj,
+    cell: String,
+    names: Vec<String>,
+    types: Vec<String>,
+    reducers: Vec<String>,
+    weights: String,
+    sd: Vec<f64>,
+) -> Result<Robj> {
+    let specs = column_specs(&names, &types, &reducers, &sd)?;
+    let mut slot: ExternalPtr<StreamSlot> = (&holder).try_into()?;
+    let stream = std::mem::replace(slot.0.as_mut(), FFI_ArrowArrayStream::empty());
+    let reader = RecordBatchStreamReader::try_new(stream).map_err(|e| other(format!("arrow error: {e}")))?;
+    let schema = reader.schema();
+    let index = |name: &str| {
+        schema
+            .index_of(name)
+            .map_err(|_| other(format!("invalid input: the Arrow data has no column `{name}`")))
+    };
+    let cell_k = index(&cell)?;
+    if schema.field(cell_k).data_type() != &DataType::UInt64 {
+        return Err(other(format!(
+            "invalid input: cell column `{cell}` must be uint64, not {}",
+            schema.field(cell_k).data_type()
+        )));
+    }
+    let value_k: Vec<usize> = names.iter().map(|n| index(n)).collect::<Result<_>>()?;
+    let weight_k = (!weights.is_empty()).then(|| index(&weights)).transpose()?;
+
+    let mut cells: Vec<u64> = Vec::new();
+    let mut values: Vec<Vec<f64>> = vec![Vec::new(); names.len()];
+    let mut w: Vec<f64> = Vec::new();
+    for batch in reader {
+        if interrupt_pending() {
+            return Err(other("interrupted: stopped by the user"));
+        }
+        let batch = batch.map_err(|e| other(format!("arrow error: {e}")))?;
+        let c = batch.column(cell_k).as_primitive::<UInt64Type>();
+        // rows with a cell, or all of them
+        let keep: Option<Vec<usize>> = (c.null_count() > 0).then(|| (0..c.len()).filter(|&i| c.is_valid(i)).collect());
+        match &keep {
+            None => cells.extend_from_slice(c.values()),
+            Some(rows) => cells.extend(rows.iter().map(|&i| c.value(i))),
+        }
+        for (k, &col) in value_k.iter().enumerate() {
+            append_f64(&mut values[k], batch.column(col).as_ref(), keep.as_deref(), &names[k])?;
+        }
+        if let Some(col) = weight_k {
+            append_f64(&mut w, batch.column(col).as_ref(), keep.as_deref(), &weights)?;
+        }
+    }
+    cells.shrink_to_fit();
+    values.iter_mut().for_each(|v| v.shrink_to_fit());
+    w.shrink_to_fit();
+    let columns = specs
+        .into_iter()
+        .zip(values)
+        .map(|(spec, values)| Column { spec, values })
+        .collect();
+    Ok(leaves_handle(Leaves {
+        cells,
+        columns,
+        weights: weight_k.map(|_| w),
+    }))
+}
+
+/// Append a numeric Arrow array to `out` as f64, null as NaN, at the rows
+/// `keep` (all when `None`).
+fn append_f64(out: &mut Vec<f64>, a: &dyn Array, keep: Option<&[usize]>, name: &str) -> Result<()> {
+    macro_rules! push {
+        ($t:ty) => {{
+            let a = a.as_primitive::<$t>();
+            let get = |i: usize| if a.is_valid(i) { a.value(i) as f64 } else { f64::NAN };
+            match keep {
+                None if a.null_count() == 0 => out.extend(a.values().iter().map(|&x| x as f64)),
+                None => out.extend((0..a.len()).map(get)),
+                Some(rows) => out.extend(rows.iter().map(|&i| get(i))),
+            }
+        }};
+    }
+    match a.data_type() {
+        DataType::Int8 => push!(Int8Type),
+        DataType::Int16 => push!(Int16Type),
+        DataType::Int32 => push!(Int32Type),
+        DataType::UInt8 => push!(UInt8Type),
+        DataType::UInt16 => push!(UInt16Type),
+        DataType::UInt32 => push!(UInt32Type),
+        DataType::Float32 => push!(Float32Type),
+        DataType::Float64 => push!(Float64Type),
+        t => {
+            return Err(other(format!(
+                "invalid input: column `{name}` must be a numeric type up to 32 bits or double, not {t}"
+            )))
+        }
+    }
+    Ok(())
 }
 
 /// Values as R: integer for types that fit, double otherwise; NA where
@@ -161,17 +356,8 @@ fn ncell_to_r(v: Vec<f64>) -> Robj {
 /// @keywords internal
 #[extendr]
 #[allow(clippy::too_many_arguments)]
-fn a5pyramid_build_rs(
-    cells: Robj,
-    values: List,
-    names: Vec<String>,
-    types: Vec<String>,
-    reducers: Vec<String>,
-    weights: Robj,
-    lods: Vec<i32>,
-    threads: i32,
-) -> Result<Robj> {
-    let leaves = leaves_from_r(&cells, &values, &names, &types, &reducers, &weights)?;
+fn a5pyramid_build_rs(leaves: Robj, lods: Vec<i32>, threads: i32) -> Result<Robj> {
+    let leaves = take_leaves(&leaves)?;
     let p = run(threads as usize, move |cancel| build(leaves, &lods, cancel))?;
     Ok(pyramid_to_r(p))
 }
@@ -182,12 +368,7 @@ fn a5pyramid_build_rs(
 #[extendr]
 #[allow(clippy::too_many_arguments)]
 fn a5pyramid_write_rs(
-    cells: Robj,
-    values: List,
-    names: Vec<String>,
-    types: Vec<String>,
-    reducers: Vec<String>,
-    weights: Robj,
+    leaves: Robj,
     lods: Vec<i32>,
     dest: String,
     tile_size: i32,
@@ -197,7 +378,7 @@ fn a5pyramid_write_rs(
     generator: String,
     threads: i32,
 ) -> Result<Robj> {
-    let leaves = leaves_from_r(&cells, &values, &names, &types, &reducers, &weights)?;
+    let leaves = take_leaves(&leaves)?;
     let tile_opts = tile_options(tile_size, generator, meta_keys, meta_values);
     let pq_opts = ParquetOptions {
         compression: Compression::parse(&compression).map_err(r_error)?,
@@ -278,6 +459,15 @@ fn set_to_r(m: &SetMeta) -> Result<Robj> {
                 "reducer",
                 Robj::from(m.columns.iter().map(|c| c.reducer.clone()).collect::<Vec<_>>())
             ),
+            (
+                "sd",
+                Robj::from(
+                    m.columns
+                        .iter()
+                        .map(|c| c.sd.map_or(Rfloat::na(), Rfloat::from))
+                        .collect::<Vec<Rfloat>>()
+                )
+            ),
         ]),
         tiers = tiers_to_r(&m.tiers),
         shards = list!(
@@ -308,12 +498,7 @@ fn set_to_r(m: &SetMeta) -> Result<Robj> {
 #[extendr]
 #[allow(clippy::too_many_arguments)]
 fn a5pyramid_write_set_rs(
-    cells: Robj,
-    values: List,
-    names: Vec<String>,
-    types: Vec<String>,
-    reducers: Vec<String>,
-    weights: Robj,
+    leaves: Robj,
     lods: Vec<i32>,
     dest: String,
     tier_lod_min: Vec<i32>,
@@ -326,7 +511,7 @@ fn a5pyramid_write_set_rs(
     generator: String,
     threads: i32,
 ) -> Result<Robj> {
-    let leaves = leaves_from_r(&cells, &values, &names, &types, &reducers, &weights)?;
+    let leaves = take_leaves(&leaves)?;
     let opts = SetOptions {
         tiers: tiers_from_r(&tier_lod_min, &tier_lod_max, &tier_shard_resolution, &tier_tile_size)?,
         generator,
@@ -372,12 +557,7 @@ struct StreamSlot(Box<FFI_ArrowArrayStream>);
 #[extendr]
 #[allow(clippy::too_many_arguments)]
 fn a5pyramid_arrow_rs(
-    cells: Robj,
-    values: List,
-    names: Vec<String>,
-    types: Vec<String>,
-    reducers: Vec<String>,
-    weights: Robj,
+    leaves: Robj,
     lods: Vec<i32>,
     tile_size: i32,
     meta_keys: Vec<String>,
@@ -385,7 +565,7 @@ fn a5pyramid_arrow_rs(
     generator: String,
     threads: i32,
 ) -> Result<Robj> {
-    let leaves = leaves_from_r(&cells, &values, &names, &types, &reducers, &weights)?;
+    let leaves = take_leaves(&leaves)?;
     let tile_opts = tile_options(tile_size, generator, meta_keys, meta_values);
     let tiled = run(threads as usize, move |cancel| {
         TiledPyramid::new(build(leaves, &lods, cancel)?, &tile_opts, cancel)
@@ -431,6 +611,15 @@ fn a5pyramid_info_rs(src: String) -> Result<Robj> {
             (
                 "reducer",
                 Robj::from(m.columns.iter().map(|c| c.reducer.clone()).collect::<Vec<_>>())
+            ),
+            (
+                "sd",
+                Robj::from(
+                    m.columns
+                        .iter()
+                        .map(|c| c.sd.map_or(Rfloat::na(), Rfloat::from))
+                        .collect::<Vec<Rfloat>>()
+                )
             ),
         ]),
         levels = list!(
@@ -566,6 +755,10 @@ fn a5pyramid_available_cpus_rs() -> i32 {
 
 extendr_module! {
     mod api;
+    fn a5pyramid_leaves_rs;
+    fn a5pyramid_leaves_info_rs;
+    fn a5pyramid_stream_slot_rs;
+    fn a5pyramid_leaves_arrow_rs;
     fn a5pyramid_build_rs;
     fn a5pyramid_write_rs;
     fn a5pyramid_arrow_rs;

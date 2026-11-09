@@ -76,6 +76,7 @@ a5_write_pyramid_set <- function(x,
                                  reducers = NULL,
                                  weights = NULL,
                                  types = NULL,
+                                 rep_sd = NULL,
                                  compression = c("snappy", "zstd", "none"),
                                  metadata = NULL,
                                  threads = NULL) {
@@ -94,20 +95,15 @@ a5_write_pyramid_set <- function(x,
   compression <- rlang::arg_match(compression)
   meta <- check_metadata(metadata)
   tiers <- check_tiers(tiers)
-  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types)
+  threads <- resolve_threads(threads)
+  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd)
   if (is.null(tiers)) {
     tiers <- a5_pyramid_set_tiers(input$resolution, input$lods)
   } else if (is.null(lods)) {
     input$lods <- tier_lods(tiers, input$resolution)
   }
-  threads <- resolve_threads(threads)
   rs_call(a5pyramid_write_set_rs(
-    cells = input$cells,
-    values = input$values,
-    names = input$names,
-    types = input$types,
-    reducers = input$reducers,
-    weights = input$weights,
+    leaves = input$leaves,
     lods = input$lods,
     dest = dest,
     tier_lod_min = tiers$lod_min,
@@ -163,8 +159,9 @@ a5_pyramid_set_tiers <- function(data_resolution, lods = NULL) {
 #'     [a5_pyramid_info()].
 #'   - `data_resolution`: the leaves' resolution.
 #'   - `bbox`: `c(xmin, ymin, xmax, ymax)` of every shard.
-#'   - `columns`: a tibble of the value columns' `name`, `type` and
-#'     `reducer`.
+#'   - `columns`: a tibble of the value columns' `name`, `type`,
+#'     `reducer` and `sd`, the standard deviation that scaled a
+#'     `"rep_child"` column (`NA` for other reducers and older files).
 #'   - `tiers`: a tibble with one row per tier: `tier` (from 0), `lod_min`,
 #'     `lod_max`, `shard_resolution`, `tile_size`, and its `shards`, `rows`
 #'     and `bytes`.

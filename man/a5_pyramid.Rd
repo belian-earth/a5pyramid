@@ -12,15 +12,20 @@ a5_pyramid(
   reducers = NULL,
   weights = NULL,
   types = NULL,
+  rep_sd = NULL,
   threads = NULL
 )
 }
 \arguments{
-\item{x}{A data frame with one \link[a5R:a5_cell]{a5R::a5_cell} column, or an
-\link[a5R:a5_cell]{a5R::a5_cell} vector. The cells must share one resolution and appear
-once each; rows with \code{NA} cells are dropped. An \link[a5R:a5_covering]{a5R::a5_covering}
-holds cells at mixed resolutions: convert it with
-\code{\link[a5R:a5_uncompact]{a5R::a5_uncompact()}} first.}
+\item{x}{A data frame with one \link[a5R:a5_cell]{a5R::a5_cell} column, an \link[a5R:a5_cell]{a5R::a5_cell}
+vector, or Arrow data with one \code{uint64} column of cells: an Arrow
+\code{Table}, \code{RecordBatch}, \code{RecordBatchReader}, \code{Dataset} or query from the
+arrow package. The cells must share one resolution and appear once
+each; rows with \code{NA} cells are dropped. An \link[a5R:a5_covering]{a5R::a5_covering} holds
+cells at mixed resolutions: convert it with \code{\link[a5R:a5_uncompact]{a5R::a5_uncompact()}}
+first. Arrow data is read into the engine batch by batch without
+passing through R, so a \code{Dataset} over Parquet files (from
+\code{\link[arrow:open_dataset]{arrow::open_dataset()}}) builds without R holding the leaves.}
 
 \item{...}{<\code{\link[tidyselect:language]{tidy-select}}> Value columns to carry
 into the pyramid. Default: every numeric column other than the cells.}
@@ -43,6 +48,15 @@ weight 0 do not count. Default \code{NULL}: every leaf counts once.}
 
 \item{types}{Named character vector of storage types for single columns,
 such as \code{c(red = "uint8", ndvi = "float32")}. See "Column types".}
+
+\item{rep_sd}{Named numeric vector of standard deviations for
+\code{"rep_child"} columns, such as \code{c(red = 60, green = 60)}. Default \code{NULL}:
+each column's standard deviation over the leaves. That depends on
+every leaf, so pyramids built from different parts of a region choose
+representatives differently even where their cells are the same; fix
+the standard deviations (from a whole-region build's
+\code{a5_pyramid_info()$columns$sd}, say) for builds whose cells must
+agree.}
 
 \item{threads}{Number of threads, or \code{NULL} (default) for
 \code{\link[=a5pyramid_threads]{a5pyramid_threads()}}.}
@@ -85,11 +99,13 @@ its reducer, \code{aggregate} unless \code{reducers} names another:
 \item \code{"mode"}: the most frequent value, by total weight when \code{weights} is
 given, ties going to the smallest value. For category codes.
 \item \code{"rep_child"}: the value of the representative leaf, the leaf closest
-to the cell's mean over all \code{"rep_child"} columns, each scaled by its
-standard deviation over the leaves so that units do not matter. Every
-\code{"rep_child"} column takes its value from the same leaf, so a coarse
-cell keeps a combination of values that occurs in the data, such as an
-RGB colour, rather than a blend.
+to the cell's mean over all \code{"rep_child"} columns, each divided by its
+standard deviation so that units do not matter. Every \code{"rep_child"}
+column takes its value from the same leaf, so a coarse cell keeps a
+combination of values that occurs in the data, such as an RGB colour,
+rather than a blend. The standard deviations are computed over the
+leaves unless \code{rep_sd} fixes them, and are recorded in the index
+(\code{\link[=a5_pyramid_info]{a5_pyramid_info()}}).
 }
 
 Missing values are skipped, and a cell whose leaves are all missing is
@@ -102,7 +118,8 @@ says otherwise. Results do not depend on the number of threads.
 Every level is stored with one schema, so each value column has one
 storage type, set by \code{types}: \code{"int8"}, \code{"int16"}, \code{"int32"}, \code{"uint8"},
 \code{"uint16"}, \code{"uint32"}, \code{"float32"} or \code{"float64"}. Integer columns
-default to \code{"int32"} and double columns to \code{"float64"}. Values, leaves
+default to \code{"int32"} and double columns to \code{"float64"}; a column of Arrow
+data defaults to its own type (\code{"float32"} for \code{float}). Values, leaves
 included, are stored as their type: an integer type rounds half to even
 (as \code{\link[=round]{round()}} does) and clamps to its range, so the mean of a \code{"uint8"}
 colour channel is a valid channel, and \code{"float32"} rounds to single
