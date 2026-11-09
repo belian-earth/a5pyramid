@@ -5,6 +5,11 @@
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
 <title>Level-of-Detail Pyramids of A5 Cells for Browser Rendering • a5pyramid</title>
+<!-- favicons --><link rel="icon" type="image/png" sizes="96x96" href="favicon-96x96.png">
+<link rel="icon" type="”image/svg+xml”" href="favicon.svg">
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+<link rel="icon" sizes="any" href="favicon.ico">
+<link rel="manifest" href="site.webmanifest">
 <script src="deps/jquery-3.6.0/jquery-3.6.0.min.js"></script><meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
 <link href="deps/bootstrap-5.3.8/bootstrap.min.css" rel="stylesheet">
 <script src="deps/bootstrap-5.3.8/bootstrap.bundle.min.js"></script><link href="deps/font-awesome-6.5.2/css/all.min.css" rel="stylesheet">
@@ -12,6 +17,7 @@
 <script src="deps/headroom-0.11.0/headroom.min.js"></script><script src="deps/headroom-0.11.0/jQuery.headroom.min.js"></script><script src="deps/bootstrap-toc-1.0.1/bootstrap-toc.min.js"></script><script src="deps/clipboard.js-2.0.11/clipboard.min.js"></script><script src="deps/search-1.0.0/autocomplete.jquery.min.js"></script><script src="deps/search-1.0.0/fuse.min.js"></script><script src="deps/search-1.0.0/mark.min.js"></script><!-- pkgdown --><script src="pkgdown.js"></script><meta property="og:title" content="Level-of-Detail Pyramids of A5 Cells for Browser Rendering">
 <meta name="description" content="Builds level-of-detail pyramids of A5 discrete global grid cells &lt;https://a5geo.org/&gt;, as created by a5R, and writes them with the cells they summarise to one Parquet file laid out for browsers. Each coarser level groups the cells by the coarse cell containing their centres and reduces each column by mean, sum, minimum, maximum, mode or a representative cell. Each level is split into tiles of nearby cells, one row group each, and the files metadata indexes every tiles level and bounding box, so a web map can fetch only the tiles in view with HTTP range requests. The engine is written in Rust and runs in parallel.">
 <meta property="og:description" content="Builds level-of-detail pyramids of A5 discrete global grid cells &lt;https://a5geo.org/&gt;, as created by a5R, and writes them with the cells they summarise to one Parquet file laid out for browsers. Each coarser level groups the cells by the coarse cell containing their centres and reduces each column by mean, sum, minimum, maximum, mode or a representative cell. Each level is split into tiles of nearby cells, one row group each, and the files metadata indexes every tiles level and bounding box, so a web map can fetch only the tiles in view with HTTP range requests. The engine is written in Rust and runs in parallel.">
+<meta property="og:image" content="https://belian-earth.github.io/a5pyramid/logo.png">
 </head>
 <body>
     <a href="#main" class="visually-hidden-focusable">Skip to contents</a>
@@ -46,12 +52,15 @@
 </nav><div class="container template-home">
 <div class="row">
   <main id="main" class="col-md-9"><div class="section level1">
-<div class="page-header"><h1 id="a5pyramid">a5pyramid<a class="anchor" aria-label="anchor" href="#a5pyramid"></a>
-</h1></div>
+<div class="page-header">
+<img src="logo.png" class="logo" alt=""><h1 id="a5pyramid-">a5pyramid 
+<a class="anchor" aria-label="anchor" href="#a5pyramid-"></a>
+</h1>
+</div>
 <!-- badges: start -->
 
 <p>a5pyramid builds level-of-detail pyramids of <a href="https://a5geo.org/" class="external-link">A5</a> cells and writes them, with the cells they summarise, to one Parquet file laid out for the browser. A web map reads the file’s footer, picks the level for its zoom and fetches only the tiles in view with HTTP range requests, for example with <a href="https://github.com/hyparam/hyparquet" class="external-link">hyparquet</a> and deck.gl. No tile server and no pre-cut tile directory are needed: one static file serves every zoom.</p>
-<p>It takes cells from <a href="https://github.com/belian-earth/a5R" class="external-link">a5R</a> and <a href="https://github.com/belian-earth/a5px" class="external-link">a5px</a>, and replaces the pyramid builder in <a href="https://github.com/belian-earth/a5view" class="external-link">a5view</a>. The engine is a Rust crate with no R dependency, in <code>src/rust/a5pyramid</code>, to be published on its own.</p>
+<p>It takes cells from <a href="https://github.com/belian-earth/a5R" class="external-link">a5R</a> and <a href="https://github.com/belian-earth/a5px" class="external-link">a5px</a>. The engine is a Rust crate with no R dependency, in <code>src/rust/a5pyramid</code>, to be published on its own.</p>
 <table class="table">
 <colgroup>
 <col width="50%">
@@ -111,9 +120,10 @@
 <span>  types <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span>B02 <span class="op">=</span> <span class="st">"uint16"</span>, B03 <span class="op">=</span> <span class="st">"uint16"</span>, B04 <span class="op">=</span> <span class="st">"uint16"</span>, B08 <span class="op">=</span> <span class="st">"uint16"</span>, ndvi <span class="op">=</span> <span class="st">"float32"</span><span class="op">)</span></span>
 <span><span class="op">)</span></span></code></pre></div>
 <div class="sourceCode" id="cb3"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="fu"><a href="reference/a5_pyramid_info.html">a5_pyramid_info</a></span><span class="op">(</span><span class="va">path</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ── a5pyramid file 'file2b25b31ec7da4.parquet' ──────────────────────────────────</span></span>
-<span><span class="co">#&gt; Size: 380.2 KB (footer 10.7 KB)</span></span>
+<code class="sourceCode R"><span><span class="va">info</span> <span class="op">&lt;-</span> <span class="fu"><a href="reference/a5_pyramid_info.html">a5_pyramid_info</a></span><span class="op">(</span><span class="va">path</span><span class="op">)</span></span>
+<span><span class="va">info</span></span>
+<span><span class="co">#&gt; ── a5pyramid file 'filec01de20b7c3ad.parquet' ──────────────────────────────────</span></span>
+<span><span class="co">#&gt; Size: 380.3 KB (footer 10.8 KB)</span></span>
 <span><span class="co">#&gt; A5 index: 1.0</span></span>
 <span><span class="co">#&gt; Leaves: resolution 18, 15,626 cells</span></span>
 <span><span class="co">#&gt; LODs: 2-18 (17 levels)</span></span>
@@ -123,7 +133,7 @@
 <span><span class="co">#&gt; rep_child&gt;, B08 &lt;uint16, rep_child&gt;, ndvi &lt;float32, mean&gt;</span></span>
 <span><span class="co">#&gt; Bbox: -70.6722, -33.4801, -70.6418, -33.4549</span></span>
 <span><span class="co">#&gt; Written by: a5pyramid 0.0.0.9000, a5 crate 1.0.0</span></span></code></pre></div>
-<p>Every coarser level groups the leaves by the cell containing their centres, so each level partitions the data and <code>ncell</code> counts the leaves under each cell. A browser opening the file reads the footer only, here a few kilobytes, and then the tiles it draws. <code><a href="reference/a5_read_pyramid.html">a5_read_pyramid()</a></code> reads levels the same way:</p>
+<p>Every coarser level groups the leaves by the cell containing their centres, so each level partitions the data and <code>ncell</code> counts the leaves under each cell. A browser opening the file reads the footer only, here 11 KB, and then the tiles it draws. <code><a href="reference/a5_read_pyramid.html">a5_read_pyramid()</a></code> reads levels the same way:</p>
 <div class="sourceCode" id="cb4"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va"><a href="https://ggplot2.tidyverse.org" class="external-link">ggplot2</a></span><span class="op">)</span></span>
 <span></span>
@@ -144,32 +154,7 @@
 <div class="section level2">
 <h2 id="performance">Performance<a class="anchor" aria-label="anchor" href="#performance"></a>
 </h2>
-<p>Writing a pyramid of 439,276 resolution-16 cells over central Scotland, with four <code>uint8</code> colour channels and a <code>float32</code> value, as a5view prepares them (<code>benchmarks/bench-vs-a5view.R</code>, 20 threads):</p>
-<table class="table">
-<thead><tr>
-<th></th>
-<th>a5view 0.3</th>
-<th>a5pyramid</th>
-</tr></thead>
-<tbody>
-<tr>
-<td>mean</td>
-<td>4.06 s</td>
-<td>0.48 s</td>
-</tr>
-<tr>
-<td>rep_child</td>
-<td>4.06 s</td>
-<td>0.49 s</td>
-</tr>
-<tr>
-<td>file size</td>
-<td>9.0 MB</td>
-<td>6.5 MB</td>
-</tr>
-</tbody>
-</table>
-<p>Both spend most of their single-threaded time in the a5 crate’s supercell lookup; a5pyramid gains by running it in parallel and by building the levels and the file without R in between. Results do not depend on the number of threads, which <code><a href="reference/a5pyramid_threads.html">a5pyramid_threads()</a></code> sets.</p>
+<p>A pyramid of 439,276 resolution-16 cells over central Scotland, with four <code>uint8</code> colour channels and a <code>float32</code> value, builds and writes in about 0.55 s on 20 threads with either <code>mean</code> or <code>rep_child</code> (<code>benchmarks/bench-write.R</code>). The file is 6.5 MB in 172 tiles, with a 78 KB footer. Results do not depend on the number of threads, which <code><a href="reference/a5pyramid_threads.html">a5pyramid_threads()</a></code> sets.</p>
 </div>
 </div>
   </main><aside class="col-md-3"><div class="links">

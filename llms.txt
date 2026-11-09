@@ -10,10 +10,9 @@ server and no pre-cut tile directory are needed: one static file serves
 every zoom.
 
 It takes cells from [a5R](https://github.com/belian-earth/a5R) and
-[a5px](https://github.com/belian-earth/a5px), and replaces the pyramid
-builder in [a5view](https://github.com/belian-earth/a5view). The engine
-is a Rust crate with no R dependency, in `src/rust/a5pyramid`, to be
-published on its own.
+[a5px](https://github.com/belian-earth/a5px). The engine is a Rust crate
+with no R dependency, in `src/rust/a5pyramid`, to be published on its
+own.
 
 |  |  |
 |----|----|
@@ -62,9 +61,10 @@ a5_write_pyramid(
 
 ``` r
 
-a5_pyramid_info(path)
-#> ── a5pyramid file 'file2b25b31ec7da4.parquet' ──────────────────────────────────
-#> Size: 380.2 KB (footer 10.7 KB)
+info <- a5_pyramid_info(path)
+info
+#> ── a5pyramid file 'filec01de20b7c3ad.parquet' ──────────────────────────────────
+#> Size: 380.3 KB (footer 10.8 KB)
 #> A5 index: 1.0
 #> Leaves: resolution 18, 15,626 cells
 #> LODs: 2-18 (17 levels)
@@ -79,7 +79,7 @@ a5_pyramid_info(path)
 Every coarser level groups the leaves by the cell containing their
 centres, so each level partitions the data and `ncell` counts the leaves
 under each cell. A browser opening the file reads the footer only, here
-a few kilobytes, and then the tiles it draws.
+11 KB, and then the tiles it draws.
 [`a5_read_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_read_pyramid.md)
 reads levels the same way:
 
@@ -122,20 +122,11 @@ checks that only the footer and the requested tile are fetched.
 
 ## Performance
 
-Writing a pyramid of 439,276 resolution-16 cells over central Scotland,
-with four `uint8` colour channels and a `float32` value, as a5view
-prepares them (`benchmarks/bench-vs-a5view.R`, 20 threads):
-
-|           | a5view 0.3 | a5pyramid |
-|-----------|------------|-----------|
-| mean      | 4.06 s     | 0.48 s    |
-| rep_child | 4.06 s     | 0.49 s    |
-| file size | 9.0 MB     | 6.5 MB    |
-
-Both spend most of their single-threaded time in the a5 crate’s
-supercell lookup; a5pyramid gains by running it in parallel and by
-building the levels and the file without R in between. Results do not
-depend on the number of threads, which
+A pyramid of 439,276 resolution-16 cells over central Scotland, with
+four `uint8` colour channels and a `float32` value, builds and writes in
+about 0.55 s on 20 threads with either `mean` or `rep_child`
+(`benchmarks/bench-write.R`). The file is 6.5 MB in 172 tiles, with a 78
+KB footer. Results do not depend on the number of threads, which
 [`a5pyramid_threads()`](https://belian-earth.github.io/a5pyramid/reference/a5pyramid_threads.md)
 sets.
 
