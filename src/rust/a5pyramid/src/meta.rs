@@ -16,13 +16,16 @@ pub const A5_INDEX_KEY: &str = "a5_index";
 pub const A5_INDEX: &str = "1.0";
 /// The newest version of the layout this crate writes and reads. A writer
 /// records the oldest version whose rules a file follows: a single pyramid
-/// file is version 1, a shard of a pyramid set version 2.
-pub const FORMAT_VERSION: u32 = 2;
+/// file is version 1, a shard of a pyramid set version 2, and either with a
+/// vector column version 3.
+pub const FORMAT_VERSION: u32 = 3;
 /// The version of a single pyramid file, whose finest level is the leaves.
 pub(crate) const SINGLE_FILE_VERSION: u32 = 1;
 /// The version of a shard of a set and of a set's index: fixed, so a later
 /// version of the format does not make readers of this one refuse them.
 pub(crate) const SHARD_FILE_VERSION: u32 = 2;
+/// The version of a file or set with a vector column, fixed as the others.
+pub(crate) const VECTOR_FILE_VERSION: u32 = 3;
 
 /// The index: what the levels are, which tiles hold each, and what area
 /// each tile covers. A tile is one row group of a Parquet file and one
@@ -69,17 +72,34 @@ pub struct ShardMeta {
     pub resolution: i32,
 }
 
-/// The index entries of value columns.
-pub(crate) fn column_meta(columns: &[crate::ColumnSpec]) -> Vec<ColumnMeta> {
-    columns
-        .iter()
-        .map(|c| ColumnMeta {
-            name: c.name.clone(),
-            ty: c.ty.as_str().to_string(),
-            reducer: c.reducer.as_str().to_string(),
-            sd: c.sd,
-        })
-        .collect()
+/// The index entries of value columns: the scalar columns, then the vector
+/// columns.
+pub(crate) fn column_meta(columns: &[crate::ColumnSpec], vectors: &[crate::VectorSpec]) -> Vec<ColumnMeta> {
+    let scalars = columns.iter().map(|c| ColumnMeta {
+        name: c.name.clone(),
+        ty: c.ty.as_str().to_string(),
+        reducer: c.reducer.as_str().to_string(),
+        sd: c.sd,
+        dim: None,
+    });
+    let vecs = vectors.iter().map(|v| ColumnMeta {
+        name: v.name.clone(),
+        ty: v.ty.as_str().to_string(),
+        reducer: crate::Reducer::RepChild.as_str().to_string(),
+        sd: v.sd,
+        dim: Some(v.dim),
+    });
+    scalars.chain(vecs).collect()
+}
+
+/// The format version a file or set with these vector columns records over
+/// `base`, its version without them.
+pub(crate) fn version_with(vectors: &[crate::VectorSpec], base: u32) -> u32 {
+    if vectors.is_empty() {
+        base
+    } else {
+        VECTOR_FILE_VERSION
+    }
 }
 
 /// A value column: its name, storage type and reducer.
@@ -94,6 +114,11 @@ pub struct ColumnMeta {
     /// other reducers and in files written before 2026-11-09.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sd: Option<f64>,
+    /// For a vector column (format version 3), its elements per cell: the
+    /// column is fixed-length binary of `dim` bytes, each an element of
+    /// `type` (`int8` or `uint8`). Absent for scalar columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dim: Option<usize>,
 }
 
 /// A level: its LOD (A5 resolution), row count, and the half-open range

@@ -57,6 +57,20 @@ impl ColumnType {
         !matches!(self, Self::Float32 | Self::Float64)
     }
 
+    /// Whether a vector column can hold this type: one byte an element.
+    pub fn is_byte(self) -> bool {
+        matches!(self, Self::Int8 | Self::UInt8)
+    }
+
+    /// A vector element's value from its byte (`Int8` or `UInt8`).
+    #[inline]
+    pub(crate) fn byte_value(self, b: u8) -> f64 {
+        match self {
+            Self::Int8 => b as i8 as f64,
+            _ => b as f64,
+        }
+    }
+
     pub(crate) fn data_type(self) -> DataType {
         match self {
             Self::Int8 => DataType::Int8,
@@ -183,6 +197,53 @@ impl Column {
     }
 
     /// The column with its `RepChild` scale fixed at `sd` ([`ColumnSpec::sd`]).
+    pub fn with_sd(mut self, sd: f64) -> Self {
+        self.spec.sd = Some(sd);
+        self
+    }
+}
+
+/// Name, element type, length and `RepChild` scale of a vector column: a
+/// fixed number of 8-bit values per cell, such as an embedding. A vector
+/// column is reduced by `RepChild` only, together with every other
+/// `RepChild` column, and stored as one fixed-length binary value per row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VectorSpec {
+    pub name: String,
+    /// `Int8` or `UInt8`.
+    pub ty: ColumnType,
+    /// Elements per cell.
+    pub dim: usize,
+    /// One standard deviation for every element, scaling the vector in the
+    /// distance to a cell's mean, as [`ColumnSpec::sd`]: `None` computes it
+    /// over all the leaves' elements (1 where that is 0 or undefined), a
+    /// value fixes it. In a built pyramid, the value used.
+    pub sd: Option<f64>,
+}
+
+/// A vector column of the leaves: `dim` elements per leaf, row by row, as
+/// bytes (an `Int8` element is its two's complement byte). Vectors are
+/// never missing.
+#[derive(Clone, Debug)]
+pub struct VectorColumn {
+    pub spec: VectorSpec,
+    pub values: Vec<u8>,
+}
+
+impl VectorColumn {
+    pub fn new(name: impl Into<String>, ty: ColumnType, dim: usize, values: Vec<u8>) -> Self {
+        Self {
+            spec: VectorSpec {
+                name: name.into(),
+                ty,
+                dim,
+                sd: None,
+            },
+            values,
+        }
+    }
+
+    /// The column with its `RepChild` scale fixed at `sd`.
     pub fn with_sd(mut self, sd: f64) -> Self {
         self.spec.sd = Some(sd);
         self

@@ -162,7 +162,18 @@ fn check_schema(arrow: &ArrowReaderMetadata, meta: &PyramidMeta) -> Result<()> {
     for c in &meta.columns {
         let ty = ColumnType::parse(&c.ty)
             .map_err(|_| Error::Format(format!("column {:?} has unknown type {:?}", c.name, c.ty)))?;
-        want(&c.name, ty.data_type())?;
+        match c.dim {
+            None => want(&c.name, ty.data_type())?,
+            Some(dim) if ty.is_byte() && dim > 0 && dim <= i32::MAX as usize => {
+                want(&c.name, DataType::FixedSizeBinary(dim as i32))?
+            }
+            Some(dim) => {
+                return Err(Error::Format(format!(
+                    "vector column {:?} of {dim} {} elements is not readable",
+                    c.name, c.ty
+                )))
+            }
+        }
     }
     Ok(())
 }
@@ -187,7 +198,7 @@ mod tests {
                 Column::new("v", ColumnType::Float64, Reducer::Mean, v.clone()),
                 Column::new("r", ColumnType::UInt8, Reducer::RepChild, v),
             ],
-            weights: None,
+            ..Default::default()
         };
         let p = build(leaves, &crate::default_lods(13), &Cancel::new()).unwrap();
         let path = dir.join("p.parquet");

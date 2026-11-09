@@ -112,7 +112,24 @@ leaves unless \code{rep_sd} fixes them, and are recorded in the index
 }
 
 Missing values are skipped, and a cell whose leaves are all missing is
-\code{NA}. The \code{weights} column, when selected, is summed unless \code{reducers}
+\code{NA}.
+}
+
+\section{Vector columns}{
+
+A \emph{vector column} holds a fixed number of 8-bit values per cell, such as
+an embedding: an integer matrix column of a data frame (one row per
+cell), or a fixed-size list of \code{int8} or \code{uint8} (or fixed-size binary,
+read as \code{uint8}) in Arrow data, as DuckDB writes \code{TINYINT[64]}. Its type
+is \code{"int8"} (default for a matrix) or \code{"uint8"}, and it is always reduced
+by \code{"rep_child"}: every element takes part in the distance to the cell's
+mean, scaled by one standard deviation over all the elements (fixed by
+\code{rep_sd} like any other column), so a coarse cell holds the whole vector
+of one leaf. A file stores it as one fixed-length binary column, so a
+64-element vector costs one column's metadata a tile rather than 64, and
+one byte an element. Files with a vector column are format version 3.
+\code{a5_pyramid()} and \code{\link[=a5_read_pyramid]{a5_read_pyramid()}} return it as an integer matrix
+column. The \code{weights} column, when selected, is summed unless \code{reducers}
 says otherwise. Results do not depend on the number of threads.
 }
 

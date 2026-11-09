@@ -19,20 +19,20 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use arrow_array::{
-    ArrayRef, Float32Array, Float64Array, Int16Array, Int32Array, Int8Array, RecordBatch, RecordBatchReader,
-    UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    ArrayRef, FixedSizeBinaryArray, Float32Array, Float64Array, Int16Array, Int32Array, Int8Array, RecordBatch,
+    RecordBatchReader, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
-use arrow_buffer::NullBuffer;
+use arrow_buffer::{Buffer, NullBuffer};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use rayon::prelude::*;
 
 use crate::bbox::{cells_bbox, Bbox};
 use crate::build::Pyramid;
 use crate::cancel::Cancel;
-use crate::column::{ColumnSpec, ColumnType};
+use crate::column::{ColumnSpec, ColumnType, VectorSpec};
 use crate::error::{invalid, Error, Result};
 use crate::meta::{
-    column_meta, LevelMeta, PyramidMeta, ShardMeta, A5_INDEX, A5_INDEX_KEY, META_KEY, SHARD_FILE_VERSION,
+    column_meta, version_with, LevelMeta, PyramidMeta, ShardMeta, A5_INDEX, A5_INDEX_KEY, META_KEY, SHARD_FILE_VERSION,
     SINGLE_FILE_VERSION,
 };
 use crate::tiles::plan_tiles;
@@ -138,13 +138,13 @@ impl TiledPyramid {
             Some(_) => (SHARD_FILE_VERSION, &all_boxes),
         };
         let meta = PyramidMeta {
-            format_version,
+            format_version: version_with(&pyramid.vectors, format_version),
             generator: opts.generator.clone(),
             a5_crate: crate::A5_CRATE_VERSION.to_string(),
             data_resolution: pyramid.data_resolution,
             tile_size: opts.tile_size,
             bbox: Bbox::covering(boxed).unwrap_or(Bbox::WORLD).to_array(),
-            columns: column_meta(&pyramid.columns),
+            columns: column_meta(&pyramid.columns, &pyramid.vectors),
             levels,
             tile_bbox,
             shard: opts.shard.clone(),
@@ -156,7 +156,7 @@ impl TiledPyramid {
         ];
         metadata.extend(opts.metadata.iter().cloned());
         let map: HashMap<String, String> = metadata.iter().cloned().collect();
-        let schema = Arc::new(Schema::new(fields(&pyramid.columns)).with_metadata(map));
+        let schema = Arc::new(Schema::new(fields(&pyramid.columns, &pyramid.vectors)).with_metadata(map));
         Ok(Self {
             pyramid,
             tiles,
@@ -223,6 +223,14 @@ impl TiledPyramid {
                 .zip(&level.values)
                 .map(|(c, v)| value_array(c.ty, &v[r.clone()])),
         );
+        for (spec, v) in self.pyramid.vectors.iter().zip(&level.vectors) {
+            let bytes = &v[r.start * spec.dim..r.end * spec.dim];
+            arrays.push(Arc::new(FixedSizeBinaryArray::try_new(
+                spec.dim as i32,
+                Buffer::from(bytes.to_vec()),
+                None,
+            )?));
+        }
         Ok(RecordBatch::try_new(Arc::clone(&self.schema), arrays)?)
     }
 
@@ -284,14 +292,20 @@ impl RecordBatchReader for TileReader {
     }
 }
 
-/// The columns: `cell`, `lod`, `ncell`, then the value columns, nullable.
-fn fields(columns: &[ColumnSpec]) -> Vec<Field> {
+/// The columns: `cell`, `lod`, `ncell`, the value columns (nullable), then
+/// the vector columns as fixed-length binary of `dim` bytes.
+fn fields(columns: &[ColumnSpec], vectors: &[VectorSpec]) -> Vec<Field> {
     let mut fields = vec![
         Field::new(CELL_COLUMN, DataType::UInt64, false),
         Field::new(LOD_COLUMN, DataType::UInt8, false),
         Field::new(NCELL_COLUMN, DataType::UInt32, false),
     ];
     fields.extend(columns.iter().map(|c| Field::new(&c.name, c.ty.data_type(), true)));
+    fields.extend(
+        vectors
+            .iter()
+            .map(|v| Field::new(&v.name, DataType::FixedSizeBinary(v.dim as i32), false)),
+    );
     fields
 }
 
@@ -345,7 +359,7 @@ mod tests {
                 Column::new("v", ColumnType::Float32, Reducer::Mean, v.clone()),
                 Column::new("r", ColumnType::UInt8, Reducer::RepChild, v),
             ],
-            weights: None,
+            ..Default::default()
         };
         build(leaves, &default_lods(13), &Cancel::new()).unwrap()
     }
@@ -463,6 +477,53 @@ mod tests {
         let all = tiled.select(Some(&[13]), None).unwrap();
         assert!(!picked.is_empty() && picked.len() < all.len());
         assert!(tiled.select(Some(&[1]), None).is_err());
+    }
+
+    #[test]
+    fn vector_columns_are_fixed_size_binary_in_a_version_3_file() {
+        use arrow_array::cast::AsArray;
+        let cells = crate::testutil::grid(12, (10.0, 10.5), (50.0, 50.3), 120);
+        let n = cells.len();
+        let bytes: Vec<u8> = (0..n * 8).map(|i| (i * 31 % 256) as u8).collect();
+        let leaves = Leaves {
+            cells,
+            columns: vec![Column::new("v", ColumnType::Float32, Reducer::Mean, vec![1.0; n])],
+            vectors: vec![crate::VectorColumn::new("emb", ColumnType::Int8, 8, bytes.clone())],
+            ..Default::default()
+        };
+        let p = build(leaves, &[8, 10], &Cancel::new()).unwrap();
+        let tiled = TiledPyramid::new(p, &opts(), &Cancel::new()).unwrap();
+        let m = tiled.meta();
+        assert_eq!(m.format_version, 3);
+        let emb = m.columns.iter().find(|c| c.name == "emb").unwrap();
+        assert_eq!(
+            (emb.dim, emb.ty.as_str(), emb.reducer.as_str()),
+            (Some(8), "int8", "rep_child")
+        );
+        assert!(m.columns.iter().find(|c| c.name == "v").unwrap().dim.is_none());
+        // the leaves' vectors come back from the file, tile by tile
+        let dir = tempdir("vectors");
+        let path = dir.join("p.parquet");
+        crate::write_parquet(&tiled, &path, &Default::default(), &Cancel::new()).unwrap();
+        let f = crate::PyramidFile::open(&path).unwrap();
+        assert_eq!(f.meta.format_version, 3);
+        let leaf_tiles = f.select(Some(&[12]), None).unwrap();
+        let mut back = Vec::new();
+        for b in f.read(&leaf_tiles).unwrap() {
+            let a = b.column_by_name("emb").unwrap().as_fixed_size_binary();
+            assert_eq!(a.value_length(), 8);
+            for i in 0..a.len() {
+                back.extend_from_slice(a.value(i));
+            }
+        }
+        assert_eq!(back, bytes);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn files_without_vectors_keep_version_1() {
+        let tiled = TiledPyramid::new(sample(), &opts(), &Cancel::new()).unwrap();
+        assert_eq!(tiled.meta().format_version, 1);
     }
 
     #[test]

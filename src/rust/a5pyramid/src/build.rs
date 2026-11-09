@@ -6,17 +6,19 @@ use std::collections::HashSet;
 use rayon::prelude::*;
 
 use crate::cancel::Cancel;
-use crate::column::{Column, ColumnSpec, Reducer};
+use crate::column::{Column, ColumnSpec, ColumnType, Reducer, VectorColumn, VectorSpec};
 use crate::error::{invalid, Error, Result};
 use crate::RESERVED_COLUMNS;
 
 /// The data a pyramid is built from: cells at one resolution, value columns
-/// aligned with them, and optional non-negative weights for means, modes
-/// and the representative leaf (NaN weights count as zero).
+/// and vector columns aligned with them, and optional non-negative weights
+/// for means, modes and the representative leaf (NaN weights count as
+/// zero).
 #[derive(Clone, Debug, Default)]
 pub struct Leaves {
     pub cells: Vec<u64>,
     pub columns: Vec<Column>,
+    pub vectors: Vec<VectorColumn>,
     pub weights: Option<Vec<f64>>,
 }
 
@@ -29,6 +31,8 @@ pub struct Level {
     pub cells: Vec<u64>,
     pub ncell: Vec<u32>,
     pub values: Vec<Vec<f64>>,
+    /// One per vector column: `dim` bytes per cell, row by row.
+    pub vectors: Vec<Vec<u8>>,
 }
 
 impl Level {
@@ -46,6 +50,7 @@ impl Level {
 pub struct Pyramid {
     pub data_resolution: i32,
     pub columns: Vec<ColumnSpec>,
+    pub vectors: Vec<VectorSpec>,
     pub levels: Vec<Level>,
 }
 
@@ -78,6 +83,7 @@ pub fn build(leaves: Leaves, lods: &[i32], cancel: &Cancel) -> Result<Pyramid> {
     let Leaves {
         cells,
         columns,
+        vectors,
         weights,
     } = leaves;
     let n = cells.len();
@@ -91,40 +97,55 @@ pub fn build(leaves: Leaves, lods: &[i32], cancel: &Cancel) -> Result<Pyramid> {
         )));
     }
     check_columns(&columns, n)?;
+    check_vectors(&vectors, &columns, n)?;
     let weights = check_weights(weights, n)?;
     let data_resolution = check_cells(&cells)?;
     let mut lods = check_lods(lods, data_resolution)?;
     cancel.check()?;
 
-    let (cells, mut columns, weights) = sort_leaves(cells, columns, weights)?;
+    let (cells, mut columns, mut vectors, weights) = sort_leaves(cells, columns, vectors, weights)?;
     cancel.check()?;
     for col in &mut columns {
         let ty = col.spec.ty;
         col.values.par_iter_mut().for_each(|v| *v = ty.quantise(*v));
     }
 
-    let rep = RepSpec::new(&columns);
+    let rep = RepSpec::new(&columns, &vectors);
     for (&k, &sd) in rep.cols.iter().zip(&rep.sds) {
         columns[k].spec.sd = Some(sd);
+    }
+    for (v, &sd) in vectors.iter_mut().zip(&rep.vec_sds) {
+        v.spec.sd = Some(sd);
     }
     // finest first, so the largest groupings (and any error) come early
     lods.sort_unstable_by(|a, b| b.cmp(a));
     let mut levels = Vec::with_capacity(lods.len() + 1);
     for &lod in &lods {
         cancel.check()?;
-        levels.push(build_level(&cells, &columns, weights.as_deref(), &rep, lod, cancel)?);
+        levels.push(build_level(
+            &cells,
+            &columns,
+            &vectors,
+            weights.as_deref(),
+            &rep,
+            lod,
+            cancel,
+        )?);
     }
     levels.reverse();
     let specs = columns.iter().map(|c| c.spec.clone()).collect();
+    let vector_specs = vectors.iter().map(|v| v.spec.clone()).collect();
     levels.push(Level {
         lod: data_resolution,
         ncell: vec![1; n],
         values: columns.into_iter().map(|c| c.values).collect(),
+        vectors: vectors.into_iter().map(|v| v.values).collect(),
         cells,
     });
     Ok(Pyramid {
         data_resolution,
         columns: specs,
+        vectors: vector_specs,
         levels,
     })
 }
@@ -159,6 +180,50 @@ fn check_columns(columns: &[Column], n: usize) -> Result<()> {
             if !(sd > 0.0 && sd.is_finite()) {
                 return Err(invalid(format!(
                     "the standard deviation of value column {name:?} must be positive and finite, not {sd}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_vectors(vectors: &[VectorColumn], columns: &[Column], n: usize) -> Result<()> {
+    let mut seen: HashSet<&str> = columns.iter().map(|c| c.spec.name.as_str()).collect();
+    for v in vectors {
+        let name = &v.spec.name;
+        if name.is_empty() {
+            return Err(invalid("vector columns need non-empty names"));
+        }
+        if RESERVED_COLUMNS.contains(&name.as_str()) {
+            return Err(invalid(format!(
+                "a vector column cannot be named {name:?}, which the pyramid uses for its own column"
+            )));
+        }
+        if !seen.insert(name.as_str()) {
+            return Err(invalid(format!("column {name:?} appears more than once")));
+        }
+        if !v.spec.ty.is_byte() {
+            return Err(invalid(format!(
+                "vector column {name:?} must be int8 or uint8, not {}",
+                v.spec.ty.as_str()
+            )));
+        }
+        let dim = v.spec.dim;
+        if dim == 0 {
+            return Err(invalid(format!(
+                "vector column {name:?} needs at least one element a cell"
+            )));
+        }
+        if n.checked_mul(dim) != Some(v.values.len()) {
+            return Err(invalid(format!(
+                "vector column {name:?} has {} bytes for {n} cells of {dim} elements",
+                v.values.len()
+            )));
+        }
+        if let Some(sd) = v.spec.sd {
+            if !(sd > 0.0 && sd.is_finite()) {
+                return Err(invalid(format!(
+                    "the standard deviation of vector column {name:?} must be positive and finite, not {sd}"
                 )));
             }
         }
@@ -226,17 +291,23 @@ fn check_lods(lods: &[i32], data_resolution: i32) -> Result<Vec<i32>> {
     Ok(lods.to_vec())
 }
 
-/// Cells, value columns and weights of the leaves, in one row order.
-type LeafParts = (Vec<u64>, Vec<Column>, Option<Vec<f64>>);
+/// Cells, value columns, vector columns and weights of the leaves, in one
+/// row order.
+type LeafParts = (Vec<u64>, Vec<Column>, Vec<VectorColumn>, Option<Vec<f64>>);
 
 /// Leaves in ascending cell order (input already in order is used as is),
 /// with duplicates rejected. Sorting needs 16 bytes a leaf for the
 /// (cell, row) pairs and 4 for the row order; the cells are rewritten in
 /// place and the columns gathered one at a time, so at most one column is
-/// held twice.
-fn sort_leaves(mut cells: Vec<u64>, columns: Vec<Column>, weights: Option<Vec<f64>>) -> Result<LeafParts> {
+/// held twice (a vector column too: input in cell order avoids the copy).
+fn sort_leaves(
+    mut cells: Vec<u64>,
+    columns: Vec<Column>,
+    vectors: Vec<VectorColumn>,
+    weights: Option<Vec<f64>>,
+) -> Result<LeafParts> {
     if cells.par_windows(2).all(|w| w[0] < w[1]) {
-        return Ok((cells, columns, weights));
+        return Ok((cells, columns, vectors, weights));
     }
     let mut order: Vec<(u64, u32)> = cells.par_iter().enumerate().map(|(i, &c)| (c, i as u32)).collect();
     order.par_sort_unstable();
@@ -265,20 +336,38 @@ fn sort_leaves(mut cells: Vec<u64>, columns: Vec<Column>, weights: Option<Vec<f6
         })
         .collect();
     let weights = weights.map(gather);
-    Ok((cells, columns, weights))
+    let vectors = vectors
+        .into_iter()
+        .map(|v| {
+            let dim = v.spec.dim;
+            let mut out = vec![0u8; v.values.len()];
+            out.par_chunks_mut(dim).zip(rows.par_iter()).for_each(|(o, &i)| {
+                let i = i as usize;
+                o.copy_from_slice(&v.values[i * dim..(i + 1) * dim]);
+            });
+            VectorColumn {
+                spec: v.spec,
+                values: out,
+            }
+        })
+        .collect();
+    Ok((cells, columns, vectors, weights))
 }
 
 /// The `RepChild` columns and the scale (1 / standard deviation, given or
 /// over the leaves) that puts each on a common footing in the distance to
-/// the mean.
+/// the mean; every vector column takes part, with one scale for all its
+/// elements.
 struct RepSpec {
     cols: Vec<usize>,
     sds: Vec<f64>,
     scales: Vec<f64>,
+    vec_sds: Vec<f64>,
+    vec_scales: Vec<f64>,
 }
 
 impl RepSpec {
-    fn new(columns: &[Column]) -> Self {
+    fn new(columns: &[Column], vectors: &[VectorColumn]) -> Self {
         let cols: Vec<usize> = columns
             .iter()
             .enumerate()
@@ -290,7 +379,48 @@ impl RepSpec {
             .map(|&k| columns[k].spec.sd.unwrap_or_else(|| leaf_sd(&columns[k].values)))
             .collect();
         let scales = sds.iter().map(|sd| 1.0 / sd).collect();
-        Self { cols, sds, scales }
+        let vec_sds: Vec<f64> = vectors
+            .iter()
+            .map(|v| v.spec.sd.unwrap_or_else(|| byte_sd(&v.values, v.spec.ty)))
+            .collect();
+        let vec_scales = vec_sds.iter().map(|sd| 1.0 / sd).collect();
+        Self {
+            cols,
+            sds,
+            scales,
+            vec_sds,
+            vec_scales,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.cols.is_empty() && self.vec_sds.is_empty()
+    }
+}
+
+/// The standard deviation of a vector column's elements over all leaves,
+/// pooled, or 1 when that is 0 or undefined; in fixed chunks, as
+/// [`leaf_sd`], so it does not depend on the thread count.
+fn byte_sd(v: &[u8], ty: ColumnType) -> f64 {
+    const CHUNK: usize = 1 << 16;
+    let sum_chunks = |f: &(dyn Fn(f64) -> f64 + Sync)| -> f64 {
+        let parts: Vec<f64> = v
+            .par_chunks(CHUNK)
+            .map(|c| c.iter().map(|&b| f(ty.byte_value(b))).sum::<f64>())
+            .collect();
+        parts.iter().sum()
+    };
+    let n = v.len();
+    if n < 2 {
+        return 1.0;
+    }
+    let mean = sum_chunks(&|x| x) / n as f64;
+    let ss = sum_chunks(&|x| (x - mean) * (x - mean));
+    let sd = (ss / (n - 1) as f64).sqrt();
+    if sd > 0.0 && sd.is_finite() {
+        sd
+    } else {
+        1.0
     }
 }
 
@@ -328,6 +458,7 @@ fn leaf_sd(v: &[f64]) -> f64 {
 fn build_level(
     cells: &[u64],
     columns: &[Column],
+    vectors: &[VectorColumn],
     weights: Option<&[f64]>,
     rep: &RepSpec,
     lod: i32,
@@ -361,15 +492,26 @@ fn build_level(
         .map(|g| starts[g + 1] - starts[g])
         .collect();
 
-    let rep_leaf: Vec<u32> = if rep.cols.is_empty() {
+    let rep_leaf: Vec<u32> = if rep.is_empty() {
         Vec::new()
     } else {
         let rep_values: Vec<&[f64]> = rep.cols.iter().map(|&k| columns[k].values.as_slice()).collect();
+        let views: Vec<VecView> = vectors
+            .iter()
+            .zip(&rep.vec_scales)
+            .map(|(v, &scale)| VecView {
+                data: &v.values,
+                dim: v.spec.dim,
+                ty: v.spec.ty,
+                scale,
+            })
+            .collect();
+        let width = rep_values.len() + views.iter().map(|v| v.dim).sum::<usize>();
         (0..n_groups)
             .into_par_iter()
             .map_init(
-                || vec![0.0; 2 * rep_values.len()],
-                |scratch, g| representative(group(g), &rep_values, &rep.scales, weights, scratch),
+                || vec![0.0; 2 * width],
+                |scratch, g| representative(group(g), &rep_values, &rep.scales, &views, weights, scratch),
             )
             .collect()
     };
@@ -394,11 +536,25 @@ fn build_level(
         cancel.check()?;
     }
 
+    let out_vectors = vectors
+        .iter()
+        .map(|v| {
+            let dim = v.spec.dim;
+            let mut out = vec![0u8; n_groups * dim];
+            out.par_chunks_mut(dim).zip(rep_leaf.par_iter()).for_each(|(o, &i)| {
+                let i = i as usize;
+                o.copy_from_slice(&v.values[i * dim..(i + 1) * dim]);
+            });
+            out
+        })
+        .collect();
+
     Ok(Level {
         lod,
         cells: out_cells,
         ncell,
         values,
+        vectors: out_vectors,
     })
 }
 
@@ -489,22 +645,34 @@ fn mode(group: &[(u64, u32)], v: &[f64], weights: Option<&[f64]>, scratch: &mut 
 /// the mean, and rounding alone would decide between them.
 const TIE: f64 = 1e-12;
 
+/// A vector column as the representative choice reads it.
+struct VecView<'a> {
+    data: &'a [u8],
+    dim: usize,
+    ty: ColumnType,
+    scale: f64,
+}
+
 /// The leaf of `group` closest to the group's weighted mean over the
-/// `RepChild` columns, each scaled to unit standard deviation. Leaves with
-/// positive weight come before those without, and leaves with fewer
-/// missing values before those with more; ties go to the first leaf, the
-/// one with the lowest cell id.
+/// `RepChild` columns and every element of the vector columns, each scaled
+/// to unit standard deviation. Leaves with positive weight come before
+/// those without, and leaves with fewer missing values before those with
+/// more; ties go to the first leaf, the one with the lowest cell id.
 fn representative(
     group: &[(u64, u32)],
     cols: &[&[f64]],
     scales: &[f64],
+    vecs: &[VecView],
     weights: Option<&[f64]>,
     scratch: &mut [f64],
 ) -> u32 {
     let d = cols.len();
-    let (mean, wsum) = scratch.split_at_mut(d);
+    let width = d + vecs.iter().map(|v| v.dim).sum::<usize>();
+    let (mean, wsum) = scratch[..2 * width].split_at_mut(width);
     mean.fill(0.0);
     wsum.fill(0.0);
+    // vectors are never missing: one weight sum serves all their elements
+    let mut wvec = 0.0;
     for &(_, i) in group {
         let i = i as usize;
         let wi = weight(weights, i);
@@ -518,9 +686,21 @@ fn representative(
                 wsum[k] += wi;
             }
         }
+        wvec += wi;
+        let mut at = d;
+        for v in vecs {
+            let row = &v.data[i * v.dim..(i + 1) * v.dim];
+            for (e, &b) in row.iter().enumerate() {
+                mean[at + e] += wi * v.ty.byte_value(b);
+            }
+            at += v.dim;
+        }
     }
     for k in 0..d {
         mean[k] = if wsum[k] > 0.0 { mean[k] / wsum[k] } else { f64::NAN };
+    }
+    for m in &mut mean[d..] {
+        *m = if wvec > 0.0 { *m / wvec } else { f64::NAN };
     }
     let mut best = group[0].1;
     let mut best_key = (u8::MAX, usize::MAX, f64::INFINITY);
@@ -539,6 +719,17 @@ fn representative(
             } else {
                 let z = (x - mean[k]) * scales[k];
                 dist += z * z;
+            }
+        }
+        if wvec > 0.0 {
+            let mut at = d;
+            for v in vecs {
+                let row = &v.data[iu * v.dim..(iu + 1) * v.dim];
+                for (e, &b) in row.iter().enumerate() {
+                    let z = (v.ty.byte_value(b) - mean[at + e]) * v.scale;
+                    dist += z * z;
+                }
+                at += v.dim;
             }
         }
         let key = (unweighted, missing, dist);
@@ -561,7 +752,7 @@ mod tests {
         Leaves {
             cells,
             columns: cols,
-            weights: None,
+            ..Default::default()
         }
     }
 
@@ -719,6 +910,130 @@ mod tests {
         assert!(same(&mk(&all, Some(10.0)), &mk(&part, Some(10.0))) > 0);
     }
 
+    /// Leaves with a 4-element int8 vector per cell, and the same elements
+    /// as four scalar int8 columns.
+    fn vector_leaves(cells: &[u64]) -> (Vec<u8>, Vec<Vec<f64>>) {
+        let n = cells.len();
+        let dim = 4;
+        let mut bytes = vec![0u8; n * dim];
+        let mut cols = vec![vec![0.0; n]; dim];
+        for i in 0..n {
+            for e in 0..dim {
+                let x = (((i * (7 + 13 * e)) ^ (i >> 3)) % 251) as i32 - 125;
+                bytes[i * dim + e] = (x as i8) as u8;
+                cols[e][i] = x as f64;
+            }
+        }
+        (bytes, cols)
+    }
+
+    #[test]
+    fn a_vector_chooses_as_its_elements_would_as_columns_of_one_scale() {
+        let cells = grid(11, (20.0, 20.4), (-5.0, -4.6), 200);
+        let (bytes, cols) = vector_leaves(&cells);
+        let sd = 40.0;
+        let as_vector = build(
+            Leaves {
+                cells: cells.clone(),
+                vectors: vec![VectorColumn::new("e", ColumnType::Int8, 4, bytes).with_sd(sd)],
+                ..Default::default()
+            },
+            &[6, 8],
+            &Cancel::new(),
+        )
+        .unwrap();
+        let columns = cols
+            .iter()
+            .enumerate()
+            .map(|(e, v)| Column::new(format!("e{e}"), ColumnType::Int8, Reducer::RepChild, v.clone()).with_sd(sd))
+            .collect();
+        let as_columns = build(leaves_with(cells, columns), &[6, 8], &Cancel::new()).unwrap();
+        assert_eq!(as_vector.vectors[0].sd, Some(sd));
+        for (a, b) in as_vector.levels.iter().zip(&as_columns.levels) {
+            assert_eq!(a.cells, b.cells);
+            for i in 0..a.len() {
+                for e in 0..4 {
+                    assert_eq!(a.vectors[0][i * 4 + e] as i8 as f64, b.values[e][i]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vectors_and_rep_child_columns_share_one_leaf() {
+        let cells = grid(11, (20.0, 20.4), (-5.0, -4.6), 200);
+        let n = cells.len();
+        let (bytes, _) = vector_leaves(&cells);
+        let r: Vec<f64> = (0..n).map(|i| ((i * 37) % 256) as f64).collect();
+        let leaves = Leaves {
+            cells: cells.clone(),
+            columns: vec![Column::new("r", ColumnType::UInt8, Reducer::RepChild, r.clone())],
+            vectors: vec![VectorColumn::new("e", ColumnType::UInt8, 4, bytes.clone())],
+            ..Default::default()
+        };
+        let p = build(leaves, &[7], &Cancel::new()).unwrap();
+        // computed sd: over every element of every leaf
+        let all: Vec<f64> = bytes.iter().map(|&b| b as f64).collect();
+        assert!((p.vectors[0].sd.unwrap() - leaf_sd(&all)).abs() < 1e-9);
+        let rows: HashSet<(u64, Vec<u8>)> = (0..n)
+            .map(|i| (r[i] as u64, bytes[i * 4..i * 4 + 4].to_vec()))
+            .collect();
+        let l = &p.levels[0];
+        for i in 0..l.len() {
+            let got = (l.values[0][i] as u64, l.vectors[0][i * 4..i * 4 + 4].to_vec());
+            assert!(rows.contains(&got), "cell {i} mixes leaves");
+        }
+        // the leaves keep their vectors in cell order
+        assert_eq!(p.levels.last().unwrap().vectors[0], bytes);
+    }
+
+    #[test]
+    fn unsorted_vectors_follow_their_cells() {
+        let cells = grid(10, (5.0, 5.4), (45.0, 45.3), 120);
+        let n = cells.len();
+        let (bytes, _) = vector_leaves(&cells);
+        let mk = |order: &[usize]| {
+            let c = order.iter().map(|&i| cells[i]).collect();
+            let b = order.iter().flat_map(|&i| bytes[i * 4..i * 4 + 4].to_vec()).collect();
+            let leaves = Leaves {
+                cells: c,
+                vectors: vec![VectorColumn::new("e", ColumnType::Int8, 4, b)],
+                ..Default::default()
+            };
+            build(leaves, &[4, 6, 8], &Cancel::new()).unwrap()
+        };
+        let sorted: Vec<usize> = (0..n).collect();
+        let reversed: Vec<usize> = (0..n).rev().collect();
+        assert_eq!(mk(&sorted), mk(&reversed));
+    }
+
+    #[test]
+    fn bad_vectors_are_refused() {
+        let cells = grid(8, (0.0, 1.0), (0.0, 1.0), 30);
+        let n = cells.len();
+        let try_build = |v: VectorColumn, cols: Vec<Column>| {
+            build(
+                Leaves {
+                    cells: cells.clone(),
+                    columns: cols,
+                    vectors: vec![v],
+                    ..Default::default()
+                },
+                &[],
+                &Cancel::new(),
+            )
+        };
+        let ok = |dim: usize| vec![0u8; n * dim];
+        assert!(try_build(VectorColumn::new("e", ColumnType::Int8, 4, ok(4)), vec![]).is_ok());
+        assert!(try_build(VectorColumn::new("e", ColumnType::Int8, 4, ok(3)), vec![]).is_err());
+        assert!(try_build(VectorColumn::new("e", ColumnType::Int8, 0, vec![]), vec![]).is_err());
+        assert!(try_build(VectorColumn::new("e", ColumnType::Int16, 4, ok(4)), vec![]).is_err());
+        assert!(try_build(VectorColumn::new("ncell", ColumnType::Int8, 4, ok(4)), vec![]).is_err());
+        assert!(try_build(VectorColumn::new("e", ColumnType::Int8, 4, ok(4)).with_sd(0.0), vec![]).is_err());
+        let clash = Column::new("e", ColumnType::Float64, Reducer::Mean, vec![1.0; n]);
+        assert!(try_build(VectorColumn::new("e", ColumnType::Int8, 4, ok(4)), vec![clash]).is_err());
+    }
+
     #[test]
     fn ties_go_to_the_lowest_cell() {
         // two leaves per group, equally far from their mean
@@ -750,6 +1065,7 @@ mod tests {
             cells,
             columns: vec![col],
             weights: Some(w),
+            ..Default::default()
         };
         let p = build(leaves, &[4], &Cancel::new()).unwrap();
         // only odd leaves (value 1) carry weight

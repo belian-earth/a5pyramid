@@ -75,3 +75,22 @@ test_that("hyparquet reads a shard of a set, footer in one request", {
   expect_identical(js$cells, hex(rows$cell[first]))
   expect_equal(js$columns$value, rows$value[first])
 })
+
+test_that("hyparquet reads a vector column as one byte array a row", {
+  hyparquet_path()
+  skip_if_not_installed("jsonlite")
+  x <- make_leaves()
+  x$emb <- matrix(sample(-128:127, nrow(x) * 16, replace = TRUE), nrow(x), 16)
+  path <- tmp_parquet()
+  a5_write_pyramid(x, path, value, emb, tile_size = 250)
+  info <- a5_pyramid_info(path)
+  rows <- a5_read_pyramid(path)
+  starts <- cumsum(c(0, info$tiles$rows))
+  rg <- info$tiles$tile[info$tiles$lod == 15L][1]
+  js <- read_hyparquet(path, rg)
+  want <- rows[(starts[rg + 1] + 1):starts[rg + 2], ]
+  expect_identical(js$format_version, 3L)
+  expect_identical(js$vector_class$emb, "Uint8Array")
+  expect_identical(js$cells, hex(want$cell))
+  expect_identical(unname(js$vectors$emb), unname(want$emb))
+})

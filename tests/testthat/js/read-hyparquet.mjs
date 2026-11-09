@@ -47,7 +47,22 @@ const out = {
   lod: rows.map((r) => Number(r.lod)),
   ncell: rows.map((r) => Number(r.ncell)),
   columns: Object.fromEntries(
-    index.columns.map((c) => [c.name, rows.map((r) => (r[c.name] == null ? null : Number(r[c.name])))]),
+    index.columns
+      .filter((c) => c.dim == null)
+      .map((c) => [c.name, rows.map((r) => (r[c.name] == null ? null : Number(r[c.name])))]),
+  ),
+  // vector columns: each row's bytes, read through a view of the element type
+  vectors: Object.fromEntries(
+    index.columns
+      .filter((c) => c.dim != null)
+      .map((c) => [c.name, rows.map((r) => {
+        const b = r[c.name];
+        const View = c.type === "int8" ? Int8Array : Uint8Array;
+        return Array.from(new View(b.buffer, b.byteOffset, c.dim));
+      })]),
+  ),
+  vector_class: Object.fromEntries(
+    index.columns.filter((c) => c.dim != null).map((c) => [c.name, rows[0][c.name]?.constructor?.name ?? null]),
   ),
   footer_fetches: footerFetches,
   row_group_bytes: metadata.row_groups[rg].columns.reduce(

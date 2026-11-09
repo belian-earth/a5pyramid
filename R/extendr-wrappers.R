@@ -9,7 +9,7 @@ NULL
 #' build.
 #' @noRd
 #' @keywords internal
-a5pyramid_leaves_rs <- function(cells, values, names, types, reducers, weights, sd) .Call(wrap__a5pyramid_leaves_rs, cells, values, names, types, reducers, weights, sd)
+a5pyramid_leaves_rs <- function(cells, values, names, types, reducers, weights, sd, dims) .Call(wrap__a5pyramid_leaves_rs, cells, values, names, types, reducers, weights, sd, dims)
 
 #' The number of leaves in a handle and the resolution of the first (NA
 #' when there are none).
@@ -31,7 +31,7 @@ a5pyramid_stream_slot_rs <- function() .Call(wrap__a5pyramid_stream_slot_rs)
 #' is never held twice; an interrupt between batches stops the read.
 #' @noRd
 #' @keywords internal
-a5pyramid_leaves_arrow_rs <- function(holder, cell, names, types, reducers, weights, sd) .Call(wrap__a5pyramid_leaves_arrow_rs, holder, cell, names, types, reducers, weights, sd)
+a5pyramid_leaves_arrow_rs <- function(holder, cell, names, types, reducers, weights, sd, dims) .Call(wrap__a5pyramid_leaves_arrow_rs, holder, cell, names, types, reducers, weights, sd, dims)
 
 #' Build a pyramid and return its rows.
 #' @noRd

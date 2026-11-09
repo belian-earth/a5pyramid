@@ -40,7 +40,7 @@ fn main() {
             let leaves = Leaves {
                 cells: cells.clone(),
                 columns,
-                weights: None,
+                ..Default::default()
             };
             let t = Instant::now();
             let p = build(leaves, &default_lods(res), &Cancel::new()).unwrap();
