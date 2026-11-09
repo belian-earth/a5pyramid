@@ -112,3 +112,36 @@ test_that("bad vector columns are refused", {
   y$emb[3, 2] <- NA
   expect_error(a5_pyramid(y, emb), "NA", class = "a5pyramid_error_input")
 })
+
+test_that("non-nullable list children, int8 binary and null vectors on dropped rows", {
+  skip_if_not_installed("arrow")
+  x <- vector_leaves(dim = 4L)
+  want <- a5_pyramid(x, emb, lods = 12L)
+  want <- want[order(want$lod, hex(want$cell)), ]
+  sorted <- function(p) p[order(p$lod, hex(p$cell)), ]
+  rows <- lapply(seq_len(nrow(x)), function(i) x$emb[i, ])
+
+  # a list whose child is not nullable, as pyarrow can write
+  child <- arrow::field("item", arrow::int8(), nullable = FALSE)
+  strict <- arrow::arrow_table(
+    cell = a5R::a5_cell_to_arrow(x$cell),
+    emb = arrow::Array$create(rows, type = arrow::fixed_size_list_of(child, 4L))
+  )
+  expect_identical(unname(sorted(a5_pyramid(strict, lods = 12L))$emb), unname(want$emb))
+
+  # fixed-size binary holding int8 bytes, as arrow reads a version-3 file
+  bin <- arrow::arrow_table(
+    cell = a5R::a5_cell_to_arrow(x$cell),
+    emb = arrow::Array$create(lapply(rows, function(r) as.raw(bitwAnd(r, 255L))), type = arrow::fixed_size_binary(4L))
+  )
+  expect_identical(unname(sorted(a5_pyramid(bin, types = c(emb = "int8"), lods = 12L))$emb), unname(want$emb))
+  expect_error(a5_pyramid(strict, types = c(emb = "uint8")), "comes from the data", class = "a5pyramid_error_input")
+
+  # a row without a cell is dropped, missing vector and all
+  cells <- a5R::a5_cell_to_arrow(c(x$cell, a5R::a5_cell(NA)))
+  holey <- arrow::arrow_table(
+    cell = cells,
+    emb = arrow::Array$create(c(rows, list(NULL)), type = arrow::fixed_size_list_of(arrow::int8(), 4L))
+  )
+  expect_identical(unname(sorted(a5_pyramid(holey, lods = 12L))$emb), unname(want$emb))
+})

@@ -78,7 +78,13 @@ view of the same bytes. A vector is never null.
 
 A vector column is always reduced by `rep_child` (see "Levels"), with every
 element taking part in the distance to the cell's mean and one `sd` for all
-its elements.
+its elements. A writer computes that `sd` over every element of every leaf,
+pooled: the sample standard deviation (n − 1) about the elements' grand
+mean, or 1 where it is 0 or undefined. When the vector is a pyramid's only
+`rep_child` input, its `sd` scales every term of the distance alike and
+cannot change a cell's representative, so builds of separate parts of a
+region agree without fixing it; with scalar `rep_child` columns beside it,
+fix the `sd`s as for any `rep_child` column.
 
 ## Tiles
 

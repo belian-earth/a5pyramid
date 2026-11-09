@@ -352,15 +352,21 @@ fn a5pyramid_leaves_arrow_rs(
 /// rows `keep` (all when `None`). Vectors are never missing.
 fn append_bytes(out: &mut Vec<u8>, a: &dyn Array, dim: usize, keep: Option<&[usize]>, name: &str) -> Result<()> {
     let bad = |what: &str| other(format!("invalid input: vector column `{name}` {what}"));
-    if a.null_count() > 0 {
+    // only the rows kept (with a cell) must hold a whole vector
+    let rows = |len: usize| -> Vec<usize> { keep.map_or_else(|| (0..len).collect(), |k| k.to_vec()) };
+    if a.null_count() > 0 && rows(a.len()).iter().any(|&i| a.is_null(i)) {
         return Err(bad("has a missing vector"));
     }
-    let rows = |len: usize| -> Vec<usize> { keep.map_or_else(|| (0..len).collect(), |k| k.to_vec()) };
     match a.data_type() {
         DataType::FixedSizeList(field, size) if *size as usize == dim => {
             let l = a.as_fixed_size_list();
             let child = l.values();
-            if child.null_count() > 0 {
+            if child.null_count() > 0
+                && rows(l.len()).iter().any(|&i| {
+                    let start = l.value_offset_at(i);
+                    (start..start + dim).any(|j| child.is_null(j))
+                })
+            {
                 return Err(bad("has a missing element"));
             }
             match field.data_type() {
@@ -483,21 +489,26 @@ fn pyramid_to_r(p: Pyramid) -> Robj {
     .into()
 }
 
-/// Vector bytes (row by row) as an R integer matrix, one row per cell.
+/// Vector bytes (row by row) as an R integer matrix, one row per cell,
+/// filled in place: 4 bytes an element beside the bytes, not 8.
 fn vector_matrix(bytes: &[u8], dim: usize, ty: ColumnType) -> Robj {
     let n = bytes.len() / dim.max(1);
-    let mut out = vec![0i32; n * dim];
-    for i in 0..n {
-        for e in 0..dim {
-            let b = bytes[i * dim + e];
-            out[e * n + i] = if ty == ColumnType::Int8 {
-                b as i8 as i32
-            } else {
-                b as i32
-            };
+    let mut out = Integers::new(n * dim);
+    {
+        let slots: &mut [Rint] = &mut out;
+        for i in 0..n {
+            for e in 0..dim {
+                let b = bytes[i * dim + e];
+                // R matrices are column-major
+                slots[e * n + i] = Rint::from(if ty == ColumnType::Int8 {
+                    b as i8 as i32
+                } else {
+                    b as i32
+                });
+            }
         }
     }
-    let mut r = Robj::from(out);
+    let mut r: Robj = out.into();
     // a fresh vector of the right length takes a dim attribute
     let _ = r.set_attrib(dim_symbol(), Robj::from(vec![n as i32, dim as i32]));
     r

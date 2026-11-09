@@ -112,7 +112,8 @@ leaves unless \code{rep_sd} fixes them, and are recorded in the index
 }
 
 Missing values are skipped, and a cell whose leaves are all missing is
-\code{NA}.
+\code{NA}. The \code{weights} column, when selected, is summed unless \code{reducers}
+says otherwise. Results do not depend on the number of threads.
 }
 
 \section{Vector columns}{
@@ -120,7 +121,8 @@ Missing values are skipped, and a cell whose leaves are all missing is
 A \emph{vector column} holds a fixed number of 8-bit values per cell, such as
 an embedding: an integer matrix column of a data frame (one row per
 cell), or a fixed-size list of \code{int8} or \code{uint8} (or fixed-size binary,
-read as \code{uint8}) in Arrow data, as DuckDB writes \code{TINYINT[64]}. Its type
+read as \code{uint8} unless \code{types} says \code{"int8"}, as arrow reads a version-3
+file's vectors) in Arrow data, as DuckDB writes \code{TINYINT[64]}. Its type
 is \code{"int8"} (default for a matrix) or \code{"uint8"}, and it is always reduced
 by \code{"rep_child"}: every element takes part in the distance to the cell's
 mean, scaled by one standard deviation over all the elements (fixed by
@@ -129,8 +131,10 @@ of one leaf. A file stores it as one fixed-length binary column, so a
 64-element vector costs one column's metadata a tile rather than 64, and
 one byte an element. Files with a vector column are format version 3.
 \code{a5_pyramid()} and \code{\link[=a5_read_pyramid]{a5_read_pyramid()}} return it as an integer matrix
-column. The \code{weights} column, when selected, is summed unless \code{reducers}
-says otherwise. Results do not depend on the number of threads.
+column. Vector columns come after the scalar columns, whatever the order
+they are selected in. When a vector is the only \code{"rep_child"} input, its
+standard deviation scales every term alike and cannot change the
+representative.
 }
 
 \section{Column types}{
