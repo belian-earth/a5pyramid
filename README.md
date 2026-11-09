@@ -1,7 +1,7 @@
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
-# a5pyramid
+# a5pyramid <a href="https://belian-earth.github.io/a5pyramid/"><img src="man/figures/logo.png" align="right" height="200" alt="a5pyramid website" /></a>
 
 <!-- badges: start -->
 
