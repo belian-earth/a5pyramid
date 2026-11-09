@@ -35,8 +35,10 @@ A list of class `a5pyramid_info`:
 
 - `bbox`: `c(xmin, ymin, xmax, ymax)` of the leaves.
 
-- `columns`: a tibble of the value columns' `name`, `type` and
-  `reducer`.
+- `columns`: a tibble of the value columns' `name`, `type`, `reducer`
+  and `sd`, the standard deviation that scaled a `"rep_child"` column (1
+  where the leaves' standard deviation is 0 or undefined; `NA` for other
+  reducers and older files).
 
 - `levels`: a tibble of each level's `lod`, `rows` and number of
   `tiles`.
@@ -48,6 +50,11 @@ A list of class `a5pyramid_info`:
 
 - `metadata`: the file's other key-value metadata, a named character
   vector.
+
+- `shard`: for a shard of a pyramid set (format version 2, written by
+  [`a5_write_pyramid_set()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid_set.md)),
+  a list of its `tier`, shard `cell` (hex) and its shard `resolution`;
+  `NULL` for a single file.
 
 ## Details
 
@@ -73,7 +80,7 @@ a5_write_pyramid(data.frame(cell = cells, value = runif(length(cells))), path)
 
 info <- a5_pyramid_info(path)
 info
-#> ── a5pyramid file file2cec41a16853.parquet ─────────────────────────────────────
+#> ── a5pyramid file file29e139449845.parquet ─────────────────────────────────────
 #> Size: 17.1 KB (footer 4.6 KB)
 #> A5 index: 1.0
 #> Leaves: resolution 15, 1,024 cells

@@ -59,6 +59,7 @@ tiles to a browser itself, or to hand the pyramid to other Arrow tools.</p>
 <span>  reducers <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  weights <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  types <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  rep_sd <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  tile_size <span class="op">=</span> <span class="fl">4096L</span>,</span>
 <span>  metadata <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  threads <span class="op">=</span> <span class="cn">NULL</span></span>
@@ -70,16 +71,22 @@ tiles to a browser itself, or to hand the pyramid to other Arrow tools.</p>
 
 
 <dl><dt id="arg-x">x<a class="anchor" aria-label="anchor" href="#arg-x"></a></dt>
-<dd><p>A data frame with one <a href="https://belian-earth.github.io/a5R/reference/a5_cell.html" class="external-link">a5R::a5_cell</a> column, or an
-<a href="https://belian-earth.github.io/a5R/reference/a5_cell.html" class="external-link">a5R::a5_cell</a> vector. The cells must share one resolution and appear
-once each; rows with <code>NA</code> cells are dropped. An <a href="https://belian-earth.github.io/a5R/reference/a5_covering.html" class="external-link">a5R::a5_covering</a>
-holds cells at mixed resolutions: convert it with
-<code><a href="https://belian-earth.github.io/a5R/reference/a5_compaction.html" class="external-link">a5R::a5_uncompact()</a></code> first.</p></dd>
+<dd><p>A data frame with one <a href="https://belian-earth.github.io/a5R/reference/a5_cell.html" class="external-link">a5R::a5_cell</a> column, an <a href="https://belian-earth.github.io/a5R/reference/a5_cell.html" class="external-link">a5R::a5_cell</a>
+vector, or Arrow data with one <code>uint64</code> column of cells: an Arrow
+<code>Table</code>, <code>RecordBatch</code>, <code>RecordBatchReader</code>, <code>Dataset</code> or query from the
+arrow package. The cells must share one resolution and appear once
+each; rows with <code>NA</code> cells are dropped. An <a href="https://belian-earth.github.io/a5R/reference/a5_covering.html" class="external-link">a5R::a5_covering</a> holds
+cells at mixed resolutions: convert it with <code><a href="https://belian-earth.github.io/a5R/reference/a5_compaction.html" class="external-link">a5R::a5_uncompact()</a></code>
+first. Arrow data is read into the engine batch by batch without
+passing through R, so a <code>Dataset</code> over Parquet files (from
+<code><a href="https://arrow.apache.org/docs/r/reference/open_dataset.html" class="external-link">arrow::open_dataset()</a></code>) builds without R holding the leaves.</p></dd>
 
 
 <dt id="arg--">...<a class="anchor" aria-label="anchor" href="#arg--"></a></dt>
 <dd><p>&lt;<code><a href="https://tidyselect.r-lib.org/reference/language.html" class="external-link">tidy-select</a></code>&gt; Value columns to carry
-into the pyramid. Default: every numeric column other than the cells.</p></dd>
+into the pyramid. Default: every numeric column other than the cells.
+For an Arrow <code>Dataset</code> that includes its partitioning columns, such as
+<code>year</code> from <code>year=2025/</code> directories, so name the value columns there.</p></dd>
 
 
 <dt id="arg-lods">lods<a class="anchor" aria-label="anchor" href="#arg-lods"></a></dt>
@@ -109,6 +116,18 @@ weight 0 do not count. Default <code>NULL</code>: every leaf counts once.</p></d
 <dt id="arg-types">types<a class="anchor" aria-label="anchor" href="#arg-types"></a></dt>
 <dd><p>Named character vector of storage types for single columns,
 such as <code>c(red = "uint8", ndvi = "float32")</code>. See "Column types".</p></dd>
+
+
+<dt id="arg-rep-sd">rep_sd<a class="anchor" aria-label="anchor" href="#arg-rep-sd"></a></dt>
+<dd><p>Named numeric vector of standard deviations for
+<code>"rep_child"</code> columns, such as <code>c(red = 60, green = 60)</code>. Default <code>NULL</code>:
+each column's standard deviation over the leaves, or 1 where that is 0
+or undefined (a constant column). That depends on
+every leaf, so pyramids built from different parts of a region choose
+representatives differently even where their cells are the same; fix
+the standard deviations (from a whole-region build's
+<code>a5_pyramid_info()$columns$sd</code>, say) for builds whose cells must
+agree.</p></dd>
 
 
 <dt id="arg-tile-size">tile_size<a class="anchor" aria-label="anchor" href="#arg-tile-size"></a></dt>

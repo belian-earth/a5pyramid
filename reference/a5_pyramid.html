@@ -56,6 +56,7 @@ Parquet file laid out for browser rendering.</p>
 <span>  reducers <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  weights <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  types <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  rep_sd <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  threads <span class="op">=</span> <span class="cn">NULL</span></span>
 <span><span class="op">)</span></span></code></pre></div>
     </div>
@@ -65,16 +66,22 @@ Parquet file laid out for browser rendering.</p>
 
 
 <dl><dt id="arg-x">x<a class="anchor" aria-label="anchor" href="#arg-x"></a></dt>
-<dd><p>A data frame with one <a href="https://belian-earth.github.io/a5R/reference/a5_cell.html" class="external-link">a5R::a5_cell</a> column, or an
-<a href="https://belian-earth.github.io/a5R/reference/a5_cell.html" class="external-link">a5R::a5_cell</a> vector. The cells must share one resolution and appear
-once each; rows with <code>NA</code> cells are dropped. An <a href="https://belian-earth.github.io/a5R/reference/a5_covering.html" class="external-link">a5R::a5_covering</a>
-holds cells at mixed resolutions: convert it with
-<code><a href="https://belian-earth.github.io/a5R/reference/a5_compaction.html" class="external-link">a5R::a5_uncompact()</a></code> first.</p></dd>
+<dd><p>A data frame with one <a href="https://belian-earth.github.io/a5R/reference/a5_cell.html" class="external-link">a5R::a5_cell</a> column, an <a href="https://belian-earth.github.io/a5R/reference/a5_cell.html" class="external-link">a5R::a5_cell</a>
+vector, or Arrow data with one <code>uint64</code> column of cells: an Arrow
+<code>Table</code>, <code>RecordBatch</code>, <code>RecordBatchReader</code>, <code>Dataset</code> or query from the
+arrow package. The cells must share one resolution and appear once
+each; rows with <code>NA</code> cells are dropped. An <a href="https://belian-earth.github.io/a5R/reference/a5_covering.html" class="external-link">a5R::a5_covering</a> holds
+cells at mixed resolutions: convert it with <code><a href="https://belian-earth.github.io/a5R/reference/a5_compaction.html" class="external-link">a5R::a5_uncompact()</a></code>
+first. Arrow data is read into the engine batch by batch without
+passing through R, so a <code>Dataset</code> over Parquet files (from
+<code><a href="https://arrow.apache.org/docs/r/reference/open_dataset.html" class="external-link">arrow::open_dataset()</a></code>) builds without R holding the leaves.</p></dd>
 
 
 <dt id="arg--">...<a class="anchor" aria-label="anchor" href="#arg--"></a></dt>
 <dd><p>&lt;<code><a href="https://tidyselect.r-lib.org/reference/language.html" class="external-link">tidy-select</a></code>&gt; Value columns to carry
-into the pyramid. Default: every numeric column other than the cells.</p></dd>
+into the pyramid. Default: every numeric column other than the cells.
+For an Arrow <code>Dataset</code> that includes its partitioning columns, such as
+<code>year</code> from <code>year=2025/</code> directories, so name the value columns there.</p></dd>
 
 
 <dt id="arg-lods">lods<a class="anchor" aria-label="anchor" href="#arg-lods"></a></dt>
@@ -104,6 +111,18 @@ weight 0 do not count. Default <code>NULL</code>: every leaf counts once.</p></d
 <dt id="arg-types">types<a class="anchor" aria-label="anchor" href="#arg-types"></a></dt>
 <dd><p>Named character vector of storage types for single columns,
 such as <code>c(red = "uint8", ndvi = "float32")</code>. See "Column types".</p></dd>
+
+
+<dt id="arg-rep-sd">rep_sd<a class="anchor" aria-label="anchor" href="#arg-rep-sd"></a></dt>
+<dd><p>Named numeric vector of standard deviations for
+<code>"rep_child"</code> columns, such as <code>c(red = 60, green = 60)</code>. Default <code>NULL</code>:
+each column's standard deviation over the leaves, or 1 where that is 0
+or undefined (a constant column). That depends on
+every leaf, so pyramids built from different parts of a region choose
+representatives differently even where their cells are the same; fix
+the standard deviations (from a whole-region build's
+<code>a5_pyramid_info()$columns$sd</code>, say) for builds whose cells must
+agree.</p></dd>
 
 
 <dt id="arg-threads">threads<a class="anchor" aria-label="anchor" href="#arg-threads"></a></dt>
@@ -142,11 +161,13 @@ its reducer, <code>aggregate</code> unless <code>reducers</code> names another:<
 <li><p><code>"mode"</code>: the most frequent value, by total weight when <code>weights</code> is
 given, ties going to the smallest value. For category codes.</p></li>
 <li><p><code>"rep_child"</code>: the value of the representative leaf, the leaf closest
-to the cell's mean over all <code>"rep_child"</code> columns, each scaled by its
-standard deviation over the leaves so that units do not matter. Every
-<code>"rep_child"</code> column takes its value from the same leaf, so a coarse
-cell keeps a combination of values that occurs in the data, such as an
-RGB colour, rather than a blend.</p></li>
+to the cell's mean over all <code>"rep_child"</code> columns, each divided by its
+standard deviation so that units do not matter. Every <code>"rep_child"</code>
+column takes its value from the same leaf, so a coarse cell keeps a
+combination of values that occurs in the data, such as an RGB colour,
+rather than a blend. The standard deviations are computed over the
+leaves unless <code>rep_sd</code> fixes them, and are recorded in the index
+(<code><a href="a5_pyramid_info.html">a5_pyramid_info()</a></code>).</p></li>
 </ul><p>Missing values are skipped, and a cell whose leaves are all missing is
 <code>NA</code>. The <code>weights</code> column, when selected, is summed unless <code>reducers</code>
 says otherwise. Results do not depend on the number of threads.</p>
@@ -158,7 +179,8 @@ says otherwise. Results do not depend on the number of threads.</p>
 <p>Every level is stored with one schema, so each value column has one
 storage type, set by <code>types</code>: <code>"int8"</code>, <code>"int16"</code>, <code>"int32"</code>, <code>"uint8"</code>,
 <code>"uint16"</code>, <code>"uint32"</code>, <code>"float32"</code> or <code>"float64"</code>. Integer columns
-default to <code>"int32"</code> and double columns to <code>"float64"</code>. Values, leaves
+default to <code>"int32"</code> and double columns to <code>"float64"</code>; a column of Arrow
+data defaults to its own type (<code>"float32"</code> for <code>float</code>). Values, leaves
 included, are stored as their type: an integer type rounds half to even
 (as <code><a href="https://rdrr.io/r/base/Round.html" class="external-link">round()</a></code> does) and clamps to its range, so the mean of a <code>"uint8"</code>
 colour channel is a valid channel, and <code>"float32"</code> rounds to single

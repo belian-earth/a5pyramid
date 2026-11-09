@@ -66,8 +66,10 @@ the file) and <code>a5_index</code> (the A5 index version of its ids).</p></li>
 LOD, ascending, the leaves last.</p></li>
 <li><p><code>tile_size</code>: the most rows in a tile.</p></li>
 <li><p><code>bbox</code>: <code>c(xmin, ymin, xmax, ymax)</code> of the leaves.</p></li>
-<li><p><code>columns</code>: a tibble of the value columns' <code>name</code>, <code>type</code> and
-<code>reducer</code>.</p></li>
+<li><p><code>columns</code>: a tibble of the value columns' <code>name</code>, <code>type</code>,
+<code>reducer</code> and <code>sd</code>, the standard deviation that scaled a
+<code>"rep_child"</code> column (1 where the leaves' standard deviation is 0 or
+undefined; <code>NA</code> for other reducers and older files).</p></li>
 <li><p><code>levels</code>: a tibble of each level's <code>lod</code>, <code>rows</code> and number of
 <code>tiles</code>.</p></li>
 <li><p><code>tiles</code>: a tibble with one row per tile, which is one row group of
@@ -76,6 +78,9 @@ readers count), <code>lod</code>, <code>rows</code>, <code>bytes</code> (compres
 reader fetches) and <code>xmin</code>, <code>ymin</code>, <code>xmax</code>, <code>ymax</code>.</p></li>
 <li><p><code>metadata</code>: the file's other key-value metadata, a named character
 vector.</p></li>
+<li><p><code>shard</code>: for a shard of a pyramid set (format version 2, written by
+<code><a href="a5_write_pyramid_set.html">a5_write_pyramid_set()</a></code>), a list of its <code>tier</code>, shard <code>cell</code> (hex)
+and its shard <code>resolution</code>; <code>NULL</code> for a single file.</p></li>
 </ul></div>
     <div class="section level2">
     <h2 id="details">Details<a class="anchor" aria-label="anchor" href="#details"></a></h2>
@@ -98,7 +103,7 @@ itself stores such a box with <code>west &gt; east</code>, as GeoJSON does.</p>
 <span class="r-in"><span></span></span>
 <span class="r-in"><span><span class="va">info</span> <span class="op">&lt;-</span> <span class="fu">a5_pyramid_info</span><span class="op">(</span><span class="va">path</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="va">info</span></span></span>
-<span class="r-msg co"><span class="r-pr">#&gt;</span> ── a5pyramid file <span style="color: #0000BB;">file2cec41a16853.parquet</span> ─────────────────────────────────────</span>
+<span class="r-msg co"><span class="r-pr">#&gt;</span> ── a5pyramid file <span style="color: #0000BB;">file29e139449845.parquet</span> ─────────────────────────────────────</span>
 <span class="r-msg co"><span class="r-pr">#&gt;</span> Size: 17.1 KB (footer 4.6 KB)</span>
 <span class="r-msg co"><span class="r-pr">#&gt;</span> A5 index: 1.0</span>
 <span class="r-msg co"><span class="r-pr">#&gt;</span> Leaves: resolution 15, 1,024 cells</span>

@@ -20,6 +20,7 @@ a5_pyramid_arrow(
   reducers = NULL,
   weights = NULL,
   types = NULL,
+  rep_sd = NULL,
   tile_size = 4096L,
   metadata = NULL,
   threads = NULL
@@ -32,20 +33,27 @@ a5_pyramid_arrow(
 
   A data frame with one
   [a5R::a5_cell](https://belian-earth.github.io/a5R/reference/a5_cell.html)
-  column, or an
+  column, an
   [a5R::a5_cell](https://belian-earth.github.io/a5R/reference/a5_cell.html)
-  vector. The cells must share one resolution and appear once each; rows
-  with `NA` cells are dropped. An
+  vector, or Arrow data with one `uint64` column of cells: an Arrow
+  `Table`, `RecordBatch`, `RecordBatchReader`, `Dataset` or query from
+  the arrow package. The cells must share one resolution and appear once
+  each; rows with `NA` cells are dropped. An
   [a5R::a5_covering](https://belian-earth.github.io/a5R/reference/a5_covering.html)
   holds cells at mixed resolutions: convert it with
   [`a5R::a5_uncompact()`](https://belian-earth.github.io/a5R/reference/a5_compaction.html)
-  first.
+  first. Arrow data is read into the engine batch by batch without
+  passing through R, so a `Dataset` over Parquet files (from
+  [`arrow::open_dataset()`](https://arrow.apache.org/docs/r/reference/open_dataset.html))
+  builds without R holding the leaves.
 
 - ...:
 
   \<[`tidy-select`](https://tidyselect.r-lib.org/reference/language.html)\>
   Value columns to carry into the pyramid. Default: every numeric column
-  other than the cells.
+  other than the cells. For an Arrow `Dataset` that includes its
+  partitioning columns, such as `year` from `year=2025/` directories, so
+  name the value columns there.
 
 - lods:
 
@@ -75,6 +83,17 @@ a5_pyramid_arrow(
 
   Named character vector of storage types for single columns, such as
   `c(red = "uint8", ndvi = "float32")`. See "Column types".
+
+- rep_sd:
+
+  Named numeric vector of standard deviations for `"rep_child"` columns,
+  such as `c(red = 60, green = 60)`. Default `NULL`: each column's
+  standard deviation over the leaves, or 1 where that is 0 or undefined
+  (a constant column). That depends on every leaf, so pyramids built
+  from different parts of a region choose representatives differently
+  even where their cells are the same; fix the standard deviations (from
+  a whole-region build's `a5_pyramid_info()$columns$sd`, say) for builds
+  whose cells must agree.
 
 - tile_size:
 

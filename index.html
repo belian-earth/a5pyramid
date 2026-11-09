@@ -73,6 +73,11 @@
 <code><a href="reference/a5_pyramid_info.html">a5_pyramid_info()</a></code> reads the index from the footer; <code><a href="reference/a5_read_pyramid.html">a5_read_pyramid()</a></code> reads levels within a bounding box, as a renderer does</td>
 </tr>
 <tr>
+<td>Sets</td>
+<td>
+<code><a href="reference/a5_write_pyramid_set.html">a5_write_pyramid_set()</a></code> splits a pyramid too large for one file into shards, each a small file around one coarse cell, with an index, <code>set.json</code>, so a browser opens only the shards in view</td>
+</tr>
+<tr>
 <td>Format</td>
 <td>One tile per Parquet row group (or Arrow record batch), with each tile’s level and bounding box indexed in the metadata; specified in <a href="src/rust/a5pyramid/FORMAT.html"><code>FORMAT.md</code></a>
 </td>

@@ -21,6 +21,18 @@ A file’s index and levels, read as a renderer reads them.
 - [`a5_read_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_read_pyramid.md)
   : Read levels of a pyramid file
 
+## Pyramid sets
+
+One pyramid as many small files, so a browser opens only those around a
+view.
+
+- [`a5_write_pyramid_set()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid_set.md)
+  : Write a pyramid as a set of shard files
+- [`a5_pyramid_set_tiers()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_set_tiers.md)
+  : Default tiers of a pyramid set
+- [`a5_pyramid_set_info()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_set_info.md)
+  : Inspect a pyramid set
+
 ## Configuration
 
 - [`a5pyramid_threads()`](https://belian-earth.github.io/a5pyramid/reference/a5pyramid_threads.md)

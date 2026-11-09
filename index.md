@@ -20,6 +20,7 @@ published on its own.
 | Build | [`a5_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid.md) builds the levels as a tibble; [`a5_write_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid.md) builds and writes them to Parquet in Rust, in parallel; [`a5_pyramid_arrow()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_arrow.md) returns the same tiles in memory as an Arrow table, without a file |
 | Reduce | mean, sum, min, max, mode, or a representative leaf that keeps real combinations of values such as colours |
 | Read | [`a5_pyramid_info()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_info.md) reads the index from the footer; [`a5_read_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_read_pyramid.md) reads levels within a bounding box, as a renderer does |
+| Sets | [`a5_write_pyramid_set()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid_set.md) splits a pyramid too large for one file into shards, each a small file around one coarse cell, with an index, `set.json`, so a browser opens only the shards in view |
 | Format | One tile per Parquet row group (or Arrow record batch), with each tile’s level and bounding box indexed in the metadata; specified in [`FORMAT.md`](https://belian-earth.github.io/a5pyramid/src/rust/a5pyramid/FORMAT.md) |
 
 ## Installation

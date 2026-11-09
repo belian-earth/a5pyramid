@@ -18,6 +18,7 @@ a5_pyramid(
   reducers = NULL,
   weights = NULL,
   types = NULL,
+  rep_sd = NULL,
   threads = NULL
 )
 ```
@@ -28,20 +29,27 @@ a5_pyramid(
 
   A data frame with one
   [a5R::a5_cell](https://belian-earth.github.io/a5R/reference/a5_cell.html)
-  column, or an
+  column, an
   [a5R::a5_cell](https://belian-earth.github.io/a5R/reference/a5_cell.html)
-  vector. The cells must share one resolution and appear once each; rows
-  with `NA` cells are dropped. An
+  vector, or Arrow data with one `uint64` column of cells: an Arrow
+  `Table`, `RecordBatch`, `RecordBatchReader`, `Dataset` or query from
+  the arrow package. The cells must share one resolution and appear once
+  each; rows with `NA` cells are dropped. An
   [a5R::a5_covering](https://belian-earth.github.io/a5R/reference/a5_covering.html)
   holds cells at mixed resolutions: convert it with
   [`a5R::a5_uncompact()`](https://belian-earth.github.io/a5R/reference/a5_compaction.html)
-  first.
+  first. Arrow data is read into the engine batch by batch without
+  passing through R, so a `Dataset` over Parquet files (from
+  [`arrow::open_dataset()`](https://arrow.apache.org/docs/r/reference/open_dataset.html))
+  builds without R holding the leaves.
 
 - ...:
 
   \<[`tidy-select`](https://tidyselect.r-lib.org/reference/language.html)\>
   Value columns to carry into the pyramid. Default: every numeric column
-  other than the cells.
+  other than the cells. For an Arrow `Dataset` that includes its
+  partitioning columns, such as `year` from `year=2025/` directories, so
+  name the value columns there.
 
 - lods:
 
@@ -71,6 +79,17 @@ a5_pyramid(
 
   Named character vector of storage types for single columns, such as
   `c(red = "uint8", ndvi = "float32")`. See "Column types".
+
+- rep_sd:
+
+  Named numeric vector of standard deviations for `"rep_child"` columns,
+  such as `c(red = 60, green = 60)`. Default `NULL`: each column's
+  standard deviation over the leaves, or 1 where that is 0 or undefined
+  (a constant column). That depends on every leaf, so pyramids built
+  from different parts of a region choose representatives differently
+  even where their cells are the same; fix the standard deviations (from
+  a whole-region build's `a5_pyramid_info()$columns$sd`, say) for builds
+  whose cells must agree.
 
 - threads:
 
@@ -117,11 +136,13 @@ its reducer, `aggregate` unless `reducers` names another:
   given, ties going to the smallest value. For category codes.
 
 - `"rep_child"`: the value of the representative leaf, the leaf closest
-  to the cell's mean over all `"rep_child"` columns, each scaled by its
-  standard deviation over the leaves so that units do not matter. Every
-  `"rep_child"` column takes its value from the same leaf, so a coarse
-  cell keeps a combination of values that occurs in the data, such as an
-  RGB colour, rather than a blend.
+  to the cell's mean over all `"rep_child"` columns, each divided by its
+  standard deviation so that units do not matter. Every `"rep_child"`
+  column takes its value from the same leaf, so a coarse cell keeps a
+  combination of values that occurs in the data, such as an RGB colour,
+  rather than a blend. The standard deviations are computed over the
+  leaves unless `rep_sd` fixes them, and are recorded in the index
+  ([`a5_pyramid_info()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_info.md)).
 
 Missing values are skipped, and a cell whose leaves are all missing is
 `NA`. The `weights` column, when selected, is summed unless `reducers`
@@ -132,13 +153,14 @@ says otherwise. Results do not depend on the number of threads.
 Every level is stored with one schema, so each value column has one
 storage type, set by `types`: `"int8"`, `"int16"`, `"int32"`, `"uint8"`,
 `"uint16"`, `"uint32"`, `"float32"` or `"float64"`. Integer columns
-default to `"int32"` and double columns to `"float64"`. Values, leaves
-included, are stored as their type: an integer type rounds half to even
-(as [`round()`](https://rdrr.io/r/base/Round.html) does) and clamps to
-its range, so the mean of a `"uint8"` colour channel is a valid channel,
-and `"float32"` rounds to single precision. `a5_pyramid()` returns the
-stored values. For a browser, `"uint8"` suits colour channels and
-`"float32"` halves the size of continuous values.
+default to `"int32"` and double columns to `"float64"`; a column of
+Arrow data defaults to its own type (`"float32"` for `float`). Values,
+leaves included, are stored as their type: an integer type rounds half
+to even (as [`round()`](https://rdrr.io/r/base/Round.html) does) and
+clamps to its range, so the mean of a `"uint8"` colour channel is a
+valid channel, and `"float32"` rounds to single precision.
+`a5_pyramid()` returns the stored values. For a browser, `"uint8"` suits
+colour channels and `"float32"` halves the size of continuous values.
 
 ## See also
 
