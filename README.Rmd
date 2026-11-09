@@ -36,10 +36,8 @@ and deck.gl. No tile server and no pre-cut tile directory are needed: one
 static file serves every zoom.
 
 It takes cells from [a5R](https://github.com/belian-earth/a5R) and
-[a5px](https://github.com/belian-earth/a5px), and replaces the pyramid
-builder in [a5view](https://github.com/belian-earth/a5view). The engine is a
-Rust crate with no R dependency, in `src/rust/a5pyramid`, to be published
-on its own.
+[a5px](https://github.com/belian-earth/a5px). The engine is a Rust crate
+with no R dependency, in `src/rust/a5pyramid`, to be published on its own.
 
 | | |
 |---|---|
@@ -85,14 +83,15 @@ a5_write_pyramid(
 ```
 
 ```{r info}
-a5_pyramid_info(path)
+info <- a5_pyramid_info(path)
+info
 ```
 
 Every coarser level groups the leaves by the cell containing their centres,
 so each level partitions the data and `ncell` counts the leaves under each
-cell. A browser opening the file reads the footer only, here a few
-kilobytes, and then the tiles it draws. `a5_read_pyramid()` reads levels the
-same way:
+cell. A browser opening the file reads the footer only, here
+`r round(info$footer_bytes / 1e3)` KB, and then the tiles it draws.
+`a5_read_pyramid()` reads levels the same way:
 
 ```{r levels, fig.width = 9, fig.height = 3.6, dpi = 120}
 library(ggplot2)
@@ -128,17 +127,9 @@ the footer and the requested tile are fetched.
 
 ## Performance
 
-Writing a pyramid of 439,276 resolution-16 cells over central Scotland,
-with four `uint8` colour channels and a `float32` value, as a5view prepares
-them (`benchmarks/bench-vs-a5view.R`, 20 threads):
-
-| | a5view 0.3 | a5pyramid |
-|---|---|---|
-| mean | 4.06 s | 0.48 s |
-| rep_child | 4.06 s | 0.49 s |
-| file size | 9.0 MB | 6.5 MB |
-
-Both spend most of their single-threaded time in the a5 crate's supercell
-lookup; a5pyramid gains by running it in parallel and by building the
-levels and the file without R in between. Results do not depend on the
-number of threads, which `a5pyramid_threads()` sets.
+A pyramid of 439,276 resolution-16 cells over central Scotland, with four
+`uint8` colour channels and a `float32` value, builds and writes in about
+0.55 s on 20 threads with either `mean` or `rep_child`
+(`benchmarks/bench-write.R`). The file is 6.5 MB in 172 tiles, with a 78 KB
+footer. Results do not depend on the number of threads, which
+`a5pyramid_threads()` sets.

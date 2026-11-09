@@ -51,6 +51,6 @@ for (agg in c("mean", "rep_child")) {
 
   cat(sprintf("%-10s %-10s %8.2f %8s %10.2f %12d\n", "a5view", agg, t_view, "", file.size(f_view) / 1e6, rg_view))
   cat(sprintf("%-10s %-10s %8.2f %7.1fx %10.2f %12d\n", "a5pyramid", agg, t_ours, t_view / t_ours,
-              info$bytes / 1e6, nrow(info$row_groups)))
+              info$bytes / 1e6, nrow(info$tiles)))
 }
-cat(sprintf("\nfooter: %.1f KB for %d row groups\n", info$footer_bytes / 1e3, nrow(info$row_groups)))
+cat(sprintf("\nfooter: %.1f KB for %d row groups\n", info$footer_bytes / 1e3, nrow(info$tiles)))
