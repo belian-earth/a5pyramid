@@ -14,8 +14,15 @@ pub const A5_INDEX_KEY: &str = "a5_index";
 /// The A5 index version of the ids this crate writes. A5 1.0 renumbered
 /// every cell, and an id does not say which version wrote it.
 pub const A5_INDEX: &str = "1.0";
-/// The version of the layout this crate writes, and the newest it reads.
-pub const FORMAT_VERSION: u32 = 1;
+/// The newest version of the layout this crate writes and reads. A writer
+/// records the oldest version whose rules a file follows: a single pyramid
+/// file is version 1, a shard of a pyramid set version 2.
+pub const FORMAT_VERSION: u32 = 2;
+/// The version of a single pyramid file, whose finest level is the leaves.
+pub(crate) const SINGLE_FILE_VERSION: u32 = 1;
+/// The version of a shard of a set and of a set's index: fixed, so a later
+/// version of the format does not make readers of this one refuse them.
+pub(crate) const SHARD_FILE_VERSION: u32 = 2;
 
 /// The index: what the levels are, which tiles hold each, and what area
 /// each tile covers. A tile is one row group of a Parquet file and one
@@ -27,12 +34,14 @@ pub struct PyramidMeta {
     pub generator: String,
     /// The a5 crate version that computed the supercells and boundaries.
     pub a5_crate: String,
-    /// The resolution of the leaves, the finest level.
+    /// The resolution of the leaves. In a single file it is the finest
+    /// level; a shard of a set may hold only coarser levels.
     pub data_resolution: i32,
     /// The most rows a tile holds.
     pub tile_size: usize,
-    /// `[west, south, east, north]` of all the leaves (`west > east` across
-    /// the antimeridian).
+    /// `[west, south, east, north]` (`west > east` across the antimeridian):
+    /// in a single file the box of the leaves, in a shard the box of every
+    /// tile, coarse cells included.
     pub bbox: [f64; 4],
     pub columns: Vec<ColumnMeta>,
     /// One entry per level, in ascending LOD order (the leaves last).
@@ -42,6 +51,35 @@ pub struct PyramidMeta {
     /// 2026-11-09, which readers accept.
     #[serde(alias = "row_group_bbox")]
     pub tile_bbox: Vec<f64>,
+    /// In a shard of a pyramid set (format version 2), which shard it is;
+    /// absent in a single file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard: Option<ShardMeta>,
+}
+
+/// Which shard of a pyramid set a file is.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ShardMeta {
+    /// The tier, numbered from 0 in ascending LOD order.
+    pub tier: usize,
+    /// The shard cell, as 16 hex digits: every cell in the file has its
+    /// centre in it.
+    pub cell: String,
+    /// The shard cell's resolution, the tier's shard resolution.
+    pub resolution: i32,
+}
+
+/// The index entries of value columns.
+pub(crate) fn column_meta(columns: &[crate::ColumnSpec]) -> Vec<ColumnMeta> {
+    columns
+        .iter()
+        .map(|c| ColumnMeta {
+            name: c.name.clone(),
+            ty: c.ty.as_str().to_string(),
+            reducer: c.reducer.as_str().to_string(),
+            sd: c.sd,
+        })
+        .collect()
 }
 
 /// A value column: its name, storage type and reducer.
@@ -51,6 +89,11 @@ pub struct ColumnMeta {
     #[serde(rename = "type")]
     pub ty: String,
     pub reducer: String,
+    /// For a `rep_child` column, the standard deviation that scaled it in
+    /// the choice of representatives ([`crate::ColumnSpec::sd`]); absent for
+    /// other reducers and in files written before 2026-11-09.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sd: Option<f64>,
 }
 
 /// A level: its LOD (A5 resolution), row count, and the half-open range

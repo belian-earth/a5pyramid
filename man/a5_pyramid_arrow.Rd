@@ -12,20 +12,27 @@ a5_pyramid_arrow(
   reducers = NULL,
   weights = NULL,
   types = NULL,
+  rep_sd = NULL,
   tile_size = 4096L,
   metadata = NULL,
   threads = NULL
 )
 }
 \arguments{
-\item{x}{A data frame with one \link[a5R:a5_cell]{a5R::a5_cell} column, or an
-\link[a5R:a5_cell]{a5R::a5_cell} vector. The cells must share one resolution and appear
-once each; rows with \code{NA} cells are dropped. An \link[a5R:a5_covering]{a5R::a5_covering}
-holds cells at mixed resolutions: convert it with
-\code{\link[a5R:a5_uncompact]{a5R::a5_uncompact()}} first.}
+\item{x}{A data frame with one \link[a5R:a5_cell]{a5R::a5_cell} column, an \link[a5R:a5_cell]{a5R::a5_cell}
+vector, or Arrow data with one \code{uint64} column of cells: an Arrow
+\code{Table}, \code{RecordBatch}, \code{RecordBatchReader}, \code{Dataset} or query from the
+arrow package. The cells must share one resolution and appear once
+each; rows with \code{NA} cells are dropped. An \link[a5R:a5_covering]{a5R::a5_covering} holds
+cells at mixed resolutions: convert it with \code{\link[a5R:a5_uncompact]{a5R::a5_uncompact()}}
+first. Arrow data is read into the engine batch by batch without
+passing through R, so a \code{Dataset} over Parquet files (from
+\code{\link[arrow:open_dataset]{arrow::open_dataset()}}) builds without R holding the leaves.}
 
 \item{...}{<\code{\link[tidyselect:language]{tidy-select}}> Value columns to carry
-into the pyramid. Default: every numeric column other than the cells.}
+into the pyramid. Default: every numeric column other than the cells.
+For an Arrow \code{Dataset} that includes its partitioning columns, such as
+\code{year} from \verb{year=2025/} directories, so name the value columns there.}
 
 \item{lods}{Integer vector of the coarser LODs to build, each below the
 leaves' resolution; the leaves are always kept. Default: every
@@ -45,6 +52,16 @@ weight 0 do not count. Default \code{NULL}: every leaf counts once.}
 
 \item{types}{Named character vector of storage types for single columns,
 such as \code{c(red = "uint8", ndvi = "float32")}. See "Column types".}
+
+\item{rep_sd}{Named numeric vector of standard deviations for
+\code{"rep_child"} columns, such as \code{c(red = 60, green = 60)}. Default \code{NULL}:
+each column's standard deviation over the leaves, or 1 where that is 0
+or undefined (a constant column). That depends on
+every leaf, so pyramids built from different parts of a region choose
+representatives differently even where their cells are the same; fix
+the standard deviations (from a whole-region build's
+\code{a5_pyramid_info()$columns$sd}, say) for builds whose cells must
+agree.}
 
 \item{tile_size}{The most rows in a tile (row group). Larger tiles mean
 fewer requests and a smaller footer; smaller tiles mean less data

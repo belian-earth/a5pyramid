@@ -46,6 +46,7 @@ on its own.
 | Build | `a5_pyramid()` builds the levels as a tibble; `a5_write_pyramid()` builds and writes them to Parquet in Rust, in parallel; `a5_pyramid_arrow()` returns the same tiles in memory as an Arrow table, without a file |
 | Reduce | mean, sum, min, max, mode, or a representative leaf that keeps real combinations of values such as colours |
 | Read | `a5_pyramid_info()` reads the index from the footer; `a5_read_pyramid()` reads levels within a bounding box, as a renderer does |
+| Sets | `a5_write_pyramid_set()` splits a pyramid too large for one file into shards, each a small file around one coarse cell, with an index, `set.json`, so a browser opens only the shards in view |
 | Format | One tile per Parquet row group (or Arrow record batch), with each tile's level and bounding box indexed in the metadata; specified in [`FORMAT.md`](src/rust/a5pyramid/FORMAT.md) |
 
 ## Installation

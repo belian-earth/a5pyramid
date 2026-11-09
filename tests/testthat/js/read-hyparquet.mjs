@@ -38,6 +38,7 @@ const out = {
   a5_index: kv.a5_index,
   format_version: index.format_version,
   lods: index.levels.map((l) => l.lod),
+  shard: index.shard ?? null,
   level_lod: level.lod,
   n_row_groups: metadata.row_groups.length,
   bbox: index.tile_bbox.slice(4 * rg, 4 * rg + 4),

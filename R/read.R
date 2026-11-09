@@ -18,8 +18,10 @@
 #'     LOD, ascending, the leaves last.
 #'   - `tile_size`: the most rows in a tile.
 #'   - `bbox`: `c(xmin, ymin, xmax, ymax)` of the leaves.
-#'   - `columns`: a tibble of the value columns' `name`, `type` and
-#'     `reducer`.
+#'   - `columns`: a tibble of the value columns' `name`, `type`,
+#'     `reducer` and `sd`, the standard deviation that scaled a
+#'     `"rep_child"` column (1 where the leaves' standard deviation is 0 or
+#'     undefined; `NA` for other reducers and older files).
 #'   - `levels`: a tibble of each level's `lod`, `rows` and number of
 #'     `tiles`.
 #'   - `tiles`: a tibble with one row per tile, which is one row group of
@@ -28,6 +30,9 @@
 #'     reader fetches) and `xmin`, `ymin`, `xmax`, `ymax`.
 #'   - `metadata`: the file's other key-value metadata, a named character
 #'     vector.
+#'   - `shard`: for a shard of a pyramid set (format version 2, written by
+#'     [a5_write_pyramid_set()]), a list of its `tier`, shard `cell` (hex)
+#'     and its shard `resolution`; `NULL` for a single file.
 #' @seealso [a5_read_pyramid()] to read rows.
 #' @export
 #' @examples
@@ -77,7 +82,8 @@ a5_pyramid_info <- function(src) {
         xmax = tile_lon$xmax,
         ymax = tiles$north
       ),
-      metadata = meta
+      metadata = meta,
+      shard = r$shard
     ),
     class = "a5pyramid_info"
   )
@@ -97,11 +103,19 @@ print.a5pyramid_info <- function(x, ...) {
     "none"
   }
   b <- round(x$bbox, 4)
-  cli::cli_rule(left = "a5pyramid file {.path {basename(x$path)}}")
+  what <- if (is.null(x$shard)) "a5pyramid file" else "a5pyramid shard"
+  cli::cli_rule(left = "{what} {.path {basename(x$path)}}")
   cli::cli_dl(c(
     "Size" = paste0(mb(x$bytes), " (footer ", mb(x$footer_bytes), ")"),
     "A5 index" = x$a5_index,
-    "Leaves" = paste0("resolution ", x$data_resolution, ", ", format(utils::tail(x$levels$rows, 1), big.mark = ","), " cells"),
+    if (is.null(x$shard)) {
+      c("Leaves" = paste0("resolution ", x$data_resolution, ", ", format(utils::tail(x$levels$rows, 1), big.mark = ","), " cells"))
+    } else {
+      c(
+        "Shard" = paste0(x$shard$cell, " (resolution ", x$shard$resolution, "), tier ", x$shard$tier),
+        "Leaves" = paste0("resolution ", x$data_resolution)
+      )
+    },
     "LODs" = lods,
     "Rows" = format(sum(x$levels$rows), big.mark = ","),
     "Tiles" = paste0(format(nrow(x$tiles), big.mark = ","), " row groups (tile size ", x$tile_size, ")"),

@@ -31,7 +31,10 @@ use crate::build::Pyramid;
 use crate::cancel::Cancel;
 use crate::column::{ColumnSpec, ColumnType};
 use crate::error::{invalid, Error, Result};
-use crate::meta::{ColumnMeta, LevelMeta, PyramidMeta, A5_INDEX, A5_INDEX_KEY, FORMAT_VERSION, META_KEY};
+use crate::meta::{
+    column_meta, LevelMeta, PyramidMeta, ShardMeta, A5_INDEX, A5_INDEX_KEY, META_KEY, SHARD_FILE_VERSION,
+    SINGLE_FILE_VERSION,
+};
 use crate::tiles::plan_tiles;
 use crate::{CELL_COLUMN, LOD_COLUMN, NCELL_COLUMN};
 
@@ -49,6 +52,10 @@ pub struct TileOptions {
     /// Keys must be distinct, and may not be [`META_KEY`], [`A5_INDEX_KEY`]
     /// or `ARROW:schema`.
     pub metadata: Vec<(String, String)>,
+    /// Set when the pyramid is one shard of a pyramid set
+    /// ([`crate::write_set`]): the index records it, takes format version 2,
+    /// and boxes every tile rather than only the finest level's.
+    pub shard: Option<ShardMeta>,
 }
 
 impl Default for TileOptions {
@@ -57,6 +64,7 @@ impl Default for TileOptions {
             tile_size: 4096,
             generator: format!("a5pyramid {}", env!("CARGO_PKG_VERSION")),
             metadata: Vec::new(),
+            shard: None,
         }
     }
 }
@@ -95,10 +103,15 @@ impl TiledPyramid {
             }
         }
 
+        if opts.shard.is_some() && pyramid.n_rows() == 0 {
+            return Err(invalid("a shard must hold at least one cell"));
+        }
+
         let mut tiles = Vec::new();
         let mut levels = Vec::with_capacity(pyramid.levels.len());
         let mut tile_bbox = Vec::new();
         let mut leaf_boxes = Vec::new();
+        let mut all_boxes = Vec::new();
         for (k, level) in pyramid.levels.iter().enumerate() {
             cancel.check()?;
             let ranges = plan_tiles(&level.cells, opts.tile_size)?;
@@ -113,26 +126,28 @@ impl TiledPyramid {
             });
             tile_bbox.extend(boxes.iter().flat_map(|b| b.to_array()));
             tiles.extend(ranges.into_iter().map(|rows| Tile { level: k, rows }));
+            all_boxes.extend(boxes.iter().copied());
             leaf_boxes = boxes;
         }
+        // A single file's box is its leaves'. A shard's must hold every
+        // tile, since coarse cells reach past the leaves under them, and a
+        // shard's finest level can be empty; it holds a cell, so some tile
+        // has a box.
+        let (format_version, boxed) = match opts.shard {
+            None => (SINGLE_FILE_VERSION, &leaf_boxes),
+            Some(_) => (SHARD_FILE_VERSION, &all_boxes),
+        };
         let meta = PyramidMeta {
-            format_version: FORMAT_VERSION,
+            format_version,
             generator: opts.generator.clone(),
             a5_crate: crate::A5_CRATE_VERSION.to_string(),
             data_resolution: pyramid.data_resolution,
             tile_size: opts.tile_size,
-            bbox: Bbox::covering(&leaf_boxes).unwrap_or(Bbox::WORLD).to_array(),
-            columns: pyramid
-                .columns
-                .iter()
-                .map(|c| ColumnMeta {
-                    name: c.name.clone(),
-                    ty: c.ty.as_str().to_string(),
-                    reducer: c.reducer.as_str().to_string(),
-                })
-                .collect(),
+            bbox: Bbox::covering(boxed).unwrap_or(Bbox::WORLD).to_array(),
+            columns: column_meta(&pyramid.columns),
             levels,
             tile_bbox,
+            shard: opts.shard.clone(),
         };
 
         let mut metadata = vec![

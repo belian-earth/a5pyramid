@@ -22,11 +22,13 @@
 #' - `"mode"`: the most frequent value, by total weight when `weights` is
 #'   given, ties going to the smallest value. For category codes.
 #' - `"rep_child"`: the value of the representative leaf, the leaf closest
-#'   to the cell's mean over all `"rep_child"` columns, each scaled by its
-#'   standard deviation over the leaves so that units do not matter. Every
-#'   `"rep_child"` column takes its value from the same leaf, so a coarse
-#'   cell keeps a combination of values that occurs in the data, such as an
-#'   RGB colour, rather than a blend.
+#'   to the cell's mean over all `"rep_child"` columns, each divided by its
+#'   standard deviation so that units do not matter. Every `"rep_child"`
+#'   column takes its value from the same leaf, so a coarse cell keeps a
+#'   combination of values that occurs in the data, such as an RGB colour,
+#'   rather than a blend. The standard deviations are computed over the
+#'   leaves unless `rep_sd` fixes them, and are recorded in the index
+#'   ([a5_pyramid_info()]).
 #'
 #' Missing values are skipped, and a cell whose leaves are all missing is
 #' `NA`. The `weights` column, when selected, is summed unless `reducers`
@@ -36,7 +38,8 @@
 #' Every level is stored with one schema, so each value column has one
 #' storage type, set by `types`: `"int8"`, `"int16"`, `"int32"`, `"uint8"`,
 #' `"uint16"`, `"uint32"`, `"float32"` or `"float64"`. Integer columns
-#' default to `"int32"` and double columns to `"float64"`. Values, leaves
+#' default to `"int32"` and double columns to `"float64"`; a column of Arrow
+#' data defaults to its own type (`"float32"` for `float`). Values, leaves
 #' included, are stored as their type: an integer type rounds half to even
 #' (as [round()] does) and clamps to its range, so the mean of a `"uint8"`
 #' colour channel is a valid channel, and `"float32"` rounds to single
@@ -44,13 +47,19 @@
 #' `"uint8"` suits colour channels and `"float32"` halves the size of
 #' continuous values.
 #'
-#' @param x A data frame with one [a5R::a5_cell] column, or an
-#'   [a5R::a5_cell] vector. The cells must share one resolution and appear
-#'   once each; rows with `NA` cells are dropped. An [a5R::a5_covering]
-#'   holds cells at mixed resolutions: convert it with
-#'   [a5R::a5_uncompact()] first.
+#' @param x A data frame with one [a5R::a5_cell] column, an [a5R::a5_cell]
+#'   vector, or Arrow data with one `uint64` column of cells: an Arrow
+#'   `Table`, `RecordBatch`, `RecordBatchReader`, `Dataset` or query from the
+#'   arrow package. The cells must share one resolution and appear once
+#'   each; rows with `NA` cells are dropped. An [a5R::a5_covering] holds
+#'   cells at mixed resolutions: convert it with [a5R::a5_uncompact()]
+#'   first. Arrow data is read into the engine batch by batch without
+#'   passing through R, so a `Dataset` over Parquet files (from
+#'   [arrow::open_dataset()]) builds without R holding the leaves.
 #' @param ... <[`tidy-select`][tidyselect::language]> Value columns to carry
 #'   into the pyramid. Default: every numeric column other than the cells.
+#'   For an Arrow `Dataset` that includes its partitioning columns, such as
+#'   `year` from `year=2025/` directories, so name the value columns there.
 #' @param lods Integer vector of the coarser LODs to build, each below the
 #'   leaves' resolution; the leaves are always kept. Default: every
 #'   resolution from 2 up to the leaves'. Resolutions 0 and 1 hold the 12
@@ -65,6 +74,15 @@
 #'   weight 0 do not count. Default `NULL`: every leaf counts once.
 #' @param types Named character vector of storage types for single columns,
 #'   such as `c(red = "uint8", ndvi = "float32")`. See "Column types".
+#' @param rep_sd Named numeric vector of standard deviations for
+#'   `"rep_child"` columns, such as `c(red = 60, green = 60)`. Default `NULL`:
+#'   each column's standard deviation over the leaves, or 1 where that is 0
+#'   or undefined (a constant column). That depends on
+#'   every leaf, so pyramids built from different parts of a region choose
+#'   representatives differently even where their cells are the same; fix
+#'   the standard deviations (from a whole-region build's
+#'   `a5_pyramid_info()$columns$sd`, say) for builds whose cells must
+#'   agree.
 #' @param threads Number of threads, or `NULL` (default) for
 #'   [a5pyramid_threads()].
 #'
@@ -104,17 +122,13 @@ a5_pyramid <- function(x,
                        reducers = NULL,
                        weights = NULL,
                        types = NULL,
+                       rep_sd = NULL,
                        threads = NULL) {
   aggregate <- rlang::arg_match(aggregate)
-  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types)
   threads <- resolve_threads(threads)
+  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd)
   out <- rs_call(a5pyramid_build_rs(
-    cells = input$cells,
-    values = input$values,
-    names = input$names,
-    types = input$types,
-    reducers = input$reducers,
-    weights = input$weights,
+    leaves = input$leaves,
     lods = input$lods,
     threads = threads
   ))
@@ -189,6 +203,7 @@ a5_write_pyramid <- function(x,
                              reducers = NULL,
                              weights = NULL,
                              types = NULL,
+                             rep_sd = NULL,
                              tile_size = 4096L,
                              compression = c("snappy", "zstd", "none"),
                              metadata = NULL,
@@ -202,15 +217,10 @@ a5_write_pyramid <- function(x,
   compression <- rlang::arg_match(compression)
   tile_size <- check_count(tile_size)
   meta <- check_metadata(metadata)
-  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types)
   threads <- resolve_threads(threads)
+  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd)
   rs_call(a5pyramid_write_rs(
-    cells = input$cells,
-    values = input$values,
-    names = input$names,
-    types = input$types,
-    reducers = input$reducers,
-    weights = input$weights,
+    leaves = input$leaves,
     lods = input$lods,
     dest = path.expand(dest),
     tile_size = tile_size,
@@ -273,6 +283,7 @@ a5_pyramid_arrow <- function(x,
                              reducers = NULL,
                              weights = NULL,
                              types = NULL,
+                             rep_sd = NULL,
                              tile_size = 4096L,
                              metadata = NULL,
                              threads = NULL) {
@@ -280,15 +291,10 @@ a5_pyramid_arrow <- function(x,
   aggregate <- rlang::arg_match(aggregate)
   tile_size <- check_count(tile_size)
   meta <- check_metadata(metadata)
-  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types)
   threads <- resolve_threads(threads)
+  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd)
   stream <- rs_call(a5pyramid_arrow_rs(
-    cells = input$cells,
-    values = input$values,
-    names = input$names,
-    types = input$types,
-    reducers = input$reducers,
-    weights = input$weights,
+    leaves = input$leaves,
     lods = input$lods,
     tile_size = tile_size,
     meta_keys = meta$keys,
@@ -311,14 +317,21 @@ pyramid_tibble <- function(out) {
 PYRAMID_TYPES <- c("int8", "int16", "int32", "uint8", "uint16", "uint32", "float32", "float64")
 PYRAMID_REDUCERS <- c("mean", "sum", "min", "max", "mode", "rep_child")
 RESERVED_COLUMNS <- c("cell", "lod", "ncell")
+# the A5 index version of the ids, as across the a5R stack
+A5_INDEX <- "1.0"
 
 #' Validate the inputs shared by a5_pyramid() and a5_write_pyramid() and
 #' resolve them to what the Rust entry points take.
 #' @noRd
 pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
-                          call = rlang::caller_env()) {
+                          rep_sd = NULL, call = rlang::caller_env()) {
   check_not_covering(x, call)
-  if (a5R::is_a5_cell(x)) {
+  arrow_src <- NULL
+  if (is_arrow_data(x)) {
+    arrow_src <- arrow_source(x, call)
+    df <- arrow_src$proto
+    cell_name <- arrow_src$cell
+  } else if (a5R::is_a5_cell(x)) {
     if (length(quos) > 0L) {
       a5pyramid_abort("input", "{.arg ...} selects columns of a data frame, but {.arg x} is an {.cls a5_cell} vector.", call = call)
     }
@@ -330,14 +343,8 @@ pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
     cells <- x[[cell_name]]
     df <- x
   } else {
-    a5pyramid_abort("input", "{.arg x} must be a data frame with an {.cls a5_cell} column or an {.cls a5_cell} vector, not {.obj_type_friendly {x}}.", call = call)
+    a5pyramid_abort("input", "{.arg x} must be a data frame with an {.cls a5_cell} column, an {.cls a5_cell} vector or Arrow data, not {.obj_type_friendly {x}}.", call = call)
   }
-  present <- !is.na(cells)
-  if (!any(present)) {
-    a5pyramid_abort("input", "{.arg x} has no cells to build a pyramid from.", call = call)
-  }
-  resolution <- a5R::a5_get_resolution(cells[which(present)[1]])
-  lods <- check_lods(lods, resolution, call)
 
   names <- select_values(df, cell_name, quos, call)
   weights_v <- NULL
@@ -345,16 +352,92 @@ pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
     weights_v <- check_weights(df, cell_name, weights, call)
   }
   reducers_v <- resolve_reducers(names, aggregate, reducers, weights, call)
-  types_v <- resolve_types(df, names, types, call)
+  types_v <- resolve_types(df, names, types, call, arrow_types = arrow_src$types)
+  sd_v <- resolve_sd(rep_sd, names, reducers_v, call)
+
+  # the leaves, converted for the engine: from R vectors, or read from the
+  # Arrow data batch by batch without passing through R
+  leaves <- if (is.null(arrow_src)) {
+    rs_call(a5pyramid_leaves_rs(
+      cells = cells,
+      values = unname(lapply(names, function(nm) df[[nm]])),
+      names = names,
+      types = unname(types_v),
+      reducers = unname(reducers_v),
+      weights = weights_v,
+      sd = sd_v
+    ), call = call)
+  } else {
+    slot <- a5pyramid_stream_slot_rs()
+    arrow_src$reader$export_to_c(slot$address)
+    rs_call(a5pyramid_leaves_arrow_rs(
+      holder = slot$holder,
+      cell = cell_name,
+      names = names,
+      types = unname(types_v),
+      reducers = unname(reducers_v),
+      weights = if (is.null(weights)) "" else weights,
+      sd = sd_v
+    ), call = call)
+  }
+  info <- a5pyramid_leaves_info_rs(leaves)
+  if (info$n == 0) {
+    a5pyramid_abort("input", "{.arg x} has no cells to build a pyramid from.", call = call)
+  }
+  resolution <- info$resolution
+  lods <- check_lods(lods, resolution, call)
 
   list(
-    cells = cells,
-    values = unname(lapply(names, function(nm) df[[nm]])),
+    leaves = leaves,
     names = names,
-    types = unname(types_v),
-    reducers = unname(reducers_v),
-    weights = weights_v,
-    lods = lods
+    lods = lods,
+    resolution = resolution
+  )
+}
+
+is_arrow_data <- function(x) {
+  inherits(x, c("ArrowTabular", "RecordBatchReader", "Dataset", "arrow_dplyr_query"))
+}
+
+#' Arrow types of value columns and the storage type each takes by default
+#' @noRd
+ARROW_VALUE_TYPES <- c(
+  int8 = "int8", int16 = "int16", int32 = "int32",
+  uint8 = "uint8", uint16 = "uint16", uint32 = "uint32",
+  float = "float32", double = "float64"
+)
+
+#' A reader over Arrow data, its uint64 cell column, its columns' Arrow
+#' types, and a zero-row data frame standing for it in column selection
+#' (numeric where the column can be a value column)
+#' @noRd
+arrow_source <- function(x, call) {
+  rlang::check_installed("arrow", reason = "to read Arrow data")
+  reader <- arrow::as_record_batch_reader(x)
+  schema <- reader$schema
+  version <- schema$metadata[["a5_index"]]
+  if (!is.null(version) && !identical(version, A5_INDEX)) {
+    a5pyramid_abort("input", c(
+      "{.arg x} holds ids from A5 index {version}, not {A5_INDEX}.",
+      "i" = "Convert pre-1.0 ids once with {.fn a5R::a5_migrate}."
+    ), call = call)
+  }
+  types <- vapply(schema$fields, function(f) f$type$ToString(), character(1))
+  names(types) <- schema$names
+  cell <- names(types)[types == "uint64"]
+  if (length(cell) != 1L) {
+    a5pyramid_abort("input", c(
+      "Arrow data {.arg x} must have one {.cls uint64} column of cells.",
+      "x" = if (length(cell) == 0L) "It has none." else "It has {length(cell)}: {.field {cell}}."
+    ), call = call)
+  }
+  proto <- lapply(types, function(t) if (t %in% names(ARROW_VALUE_TYPES)) double() else character())
+  proto[[cell]] <- a5R::a5_cell()
+  list(
+    reader = reader,
+    cell = cell,
+    types = types,
+    proto = tibble::new_tibble(proto, nrow = 0L)
   )
 }
 
@@ -486,11 +569,46 @@ resolve_reducers <- function(names, aggregate, reducers, weights, call) {
   out
 }
 
-resolve_types <- function(df, names, types, call) {
+resolve_types <- function(df, names, types, call, arrow_types = NULL) {
   given <- check_named_choice(types, "types", names, PYRAMID_TYPES, call)
-  out <- vapply(names, function(nm) if (is.integer(df[[nm]])) "int32" else "float64", character(1))
+  out <- if (is.null(arrow_types)) {
+    vapply(names, function(nm) if (is.integer(df[[nm]])) "int32" else "float64", character(1))
+  } else {
+    vapply(names, function(nm) ARROW_VALUE_TYPES[[arrow_types[[nm]]]], character(1))
+  }
+  names(out) <- names
   out[names(given)] <- given
   out
+}
+
+#' The standard deviation fixing each value column's rep_child scale, NA
+#' where it is computed from the leaves (and for other reducers)
+#' @noRd
+resolve_sd <- function(rep_sd, names, reducers, call) {
+  out <- rep(NA_real_, length(names))
+  names(out) <- names
+  if (is.null(rep_sd)) {
+    return(unname(out))
+  }
+  if (is.list(rep_sd)) rep_sd <- unlist(rep_sd)
+  nm <- names(rep_sd)
+  if (!is.numeric(rep_sd) || is.null(nm) || anyNA(nm) || any(!nzchar(nm)) || anyDuplicated(nm)) {
+    a5pyramid_abort("input", "{.arg rep_sd} must be a numeric vector named by {.val rep_child} column.", call = call)
+  }
+  rep_cols <- names[reducers == "rep_child"]
+  unknown <- setdiff(nm, rep_cols)
+  if (length(unknown) > 0L) {
+    a5pyramid_abort("input", c(
+      "{.arg rep_sd} names {?a column that is not a/columns that are not} {.val rep_child} column{?s}: {.field {unknown}}.",
+      "i" = if (length(rep_cols)) "{.val rep_child} columns: {.field {rep_cols}}." else "No column is reduced by {.val rep_child}."
+    ), call = call)
+  }
+  bad <- nm[is.na(rep_sd) | !is.finite(rep_sd) | rep_sd <= 0]
+  if (length(bad) > 0L) {
+    a5pyramid_abort("input", "{.arg rep_sd} must be positive and finite, not for {.field {bad}}.", call = call)
+  }
+  out[nm] <- as.double(rep_sd)
+  unname(out)
 }
 
 check_metadata <- function(metadata, call = rlang::caller_env()) {

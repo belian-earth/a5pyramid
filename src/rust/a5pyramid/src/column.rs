@@ -116,10 +116,11 @@ pub enum Reducer {
     /// go to the smallest value. For categories.
     Mode,
     /// The value of the representative leaf: the leaf closest to the cell's
-    /// (weighted) mean over all `RepChild` columns, each scaled by its
-    /// standard deviation over the leaves. Every `RepChild` column takes its
-    /// value from the same leaf, so a row keeps a real combination of values
-    /// (an RGB colour, say) rather than a blend.
+    /// (weighted) mean over all `RepChild` columns, each divided by its
+    /// standard deviation ([`ColumnSpec::sd`]: given, or computed over the
+    /// leaves). Every `RepChild` column takes its value from the same leaf,
+    /// so a row keeps a real combination of values (an RGB colour, say)
+    /// rather than a blend.
     RepChild,
 }
 
@@ -151,6 +152,14 @@ pub struct ColumnSpec {
     pub name: String,
     pub ty: ColumnType,
     pub reducer: Reducer,
+    /// For a `RepChild` column, the standard deviation that scales it in the
+    /// distance to a cell's mean. In the leaves, `None` computes it over
+    /// the leaves (1 where that is 0 or undefined, as for a constant
+    /// column), and a value fixes it: builds of separate parts of a region
+    /// that share it choose a cell's representative from its own leaves
+    /// alone. In a built pyramid, the value used. Always `None` for other
+    /// reducers.
+    pub sd: Option<f64>,
 }
 
 /// A value column of the leaves: one value per leaf, NaN where missing.
@@ -167,9 +176,16 @@ impl Column {
                 name: name.into(),
                 ty,
                 reducer,
+                sd: None,
             },
             values,
         }
+    }
+
+    /// The column with its `RepChild` scale fixed at `sd` ([`ColumnSpec::sd`]).
+    pub fn with_sd(mut self, sd: f64) -> Self {
+        self.spec.sd = Some(sd);
+        self
     }
 }
 

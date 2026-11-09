@@ -188,3 +188,40 @@ test_that("bad input is refused with classed errors", {
   expect_error(a5_pyramid(a5R::a5_cell(NA_character_)), class = "a5pyramid_error_input")
   expect_error(a5_pyramid(x, threads = 0), class = "a5pyramid_error_input")
 })
+
+test_that("rep_child's standard deviations are recorded, and given ones are used", {
+  x <- make_leaves()
+  x$red <- sample(0:255, nrow(x), replace = TRUE)
+  x$green <- sample(0:255, nrow(x), replace = TRUE)
+  path <- tmp_parquet()
+  a5_write_pyramid(x, path, red, green, count, aggregate = "rep_child", reducers = c(count = "sum"))
+  cols <- a5_pyramid_info(path)$columns
+  expect_equal(cols$sd[1:2], c(stats::sd(x$red), stats::sd(x$green)))
+  expect_true(is.na(cols$sd[3]))
+
+  computed <- a5_pyramid(x, red, green, aggregate = "rep_child")
+  given <- a5_pyramid(x, red, green, aggregate = "rep_child", rep_sd = c(red = cols$sd[1], green = cols$sd[2]))
+  expect_identical(given, computed)
+  # all but ignoring green: each cell takes the leaf nearest in red
+  red_only <- a5_pyramid(x, red, green, aggregate = "rep_child", rep_sd = c(green = 1e9), lods = 12L)
+  l12 <- level(red_only, 12L)
+  g <- groups_at(x$cell, 12L)
+  mean_red <- tapply(x$red, g, mean)
+  for (k in seq_len(nrow(l12))) {
+    reds <- x$red[g == hex(l12$cell[k])]
+    expect_equal(abs(l12$red[k] - mean_red[[hex(l12$cell[k])]]), min(abs(reds - mean_red[[hex(l12$cell[k])]])))
+  }
+})
+
+test_that("bad rep_sd is refused", {
+  x <- make_leaves()
+  err <- function(...) expect_error(a5_pyramid(x, value, count, aggregate = "rep_child", reducers = c(count = "sum"), ...),
+                                    class = "a5pyramid_error_input")
+  err(rep_sd = c(count = 1))
+  err(rep_sd = c(value = 0))
+  err(rep_sd = c(value = NA))
+  err(rep_sd = c(value = Inf))
+  err(rep_sd = 1)
+  err(rep_sd = c(value = "1"))
+  expect_error(a5_pyramid(x, value, rep_sd = c(value = 1)), "No column is reduced", class = "a5pyramid_error_input")
+})

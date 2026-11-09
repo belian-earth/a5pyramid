@@ -1,5 +1,42 @@
 # a5pyramid (development version)
 
+* Pyramid sets: `a5_write_pyramid_set()` writes one pyramid as a directory
+  of small files, *shards*, with an index, `set.json`, for data too large
+  for one file to open in a browser, whose footer grows by about 365 bytes
+  a tile (about 20 MB for 150 million leaves). The LODs are split into
+  tiers; a cell belongs to the shard keyed by its supercell at the tier's
+  shard resolution, so every cell is in exactly one shard, and levels are
+  built from all the leaves before the split. `a5_pyramid_set_tiers()`
+  gives the default tiers (three LODs a tier, shards 12 resolutions coarser
+  than the tier's finest LOD, so a view meets a few shards at any zoom),
+  and `a5_pyramid_set_info()` reads the index. A write that fails or is
+  interrupted removes what it wrote, so it can be run again into the same
+  directory. In the crate: `write_set()`, `SetMeta`, `Tier` and
+  `default_tiers()`.
+* Format version 2 (`FORMAT.md`, "Pyramid sets"): shards are a5pyramid
+  files whose index records the `shard` (tier, shard cell, resolution),
+  whose finest level need not be the leaves, and whose `bbox` covers every
+  tile rather than only the leaves. A writer records the oldest version a
+  file follows, so single files are still version 1 and a5view reads them
+  as before; readers of this version read both. `a5_pyramid_info()` returns
+  the `shard` and prints a shard as one.
+* Arrow data as input: `x` may be an Arrow `Table`, `RecordBatch`,
+  `RecordBatchReader`, `Dataset` or query with one `uint64` cell column.
+  It is read into the engine batch by batch through the Arrow C stream
+  interface, without passing through R, so a build from
+  `arrow::open_dataset()` over Parquet files holds no copy of the leaves in
+  R; value columns default to their own Arrow types.
+* `rep_sd` fixes the standard deviations that scale `"rep_child"` columns,
+  so pyramids of separate parts of a region choose a cell's representative
+  from its own leaves alone. The standard deviations used, given or
+  computed, are recorded in the index (`sd` in `columns`) and returned by
+  `a5_pyramid_info()` and `a5_pyramid_set_info()`.
+* Builds need less memory: sorting the leaves rewrites the cells in place
+  and gathers one column at a time, levels and shards are grouped without
+  holding their row pairs twice, and shard rows are grouped by a counting
+  sort (4 bytes a row instead of 16). The Sabah AEF set (149.6 million
+  res-18 leaves, three bands) peaks at 13.3 GB from a data frame, down from
+  21.2 GB, and at 9.3 GB from an Arrow `Dataset`, with identical shards.
 * First version: a Rust engine, with R bindings, that builds
   level-of-detail pyramids of A5 cells and writes them to one Parquet file
   for browser rendering. It replaces the R implementation in a5view 0.3.

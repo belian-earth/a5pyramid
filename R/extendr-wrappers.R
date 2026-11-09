@@ -5,15 +5,43 @@
 #' @useDynLib a5pyramid, .registration = TRUE
 NULL
 
+#' Convert leaves from R vectors (see `leaves_from_r()`) into a handle for a
+#' build.
+#' @noRd
+#' @keywords internal
+a5pyramid_leaves_rs <- function(cells, values, names, types, reducers, weights, sd) .Call(wrap__a5pyramid_leaves_rs, cells, values, names, types, reducers, weights, sd)
+
+#' The number of leaves in a handle and the resolution of the first (NA
+#' when there are none).
+#' @noRd
+#' @keywords internal
+a5pyramid_leaves_info_rs <- function(handle) .Call(wrap__a5pyramid_leaves_info_rs, handle)
+
+#' An empty Arrow C stream for the arrow package to export a reader into:
+#' `holder` owns it, `address` is its address as a decimal string.
+#' @noRd
+#' @keywords internal
+a5pyramid_stream_slot_rs <- function() .Call(wrap__a5pyramid_stream_slot_rs)
+
+#' Read leaves from the Arrow C stream in `holder` (from
+#' `a5pyramid_stream_slot_rs()`, filled by arrow) into a handle for a build:
+#' the uint64 column `cell` (rows with null cells dropped), the value
+#' columns `names` as f64 (null as missing), and the weights column
+#' `weights` (`""` for none). Batches are read one at a time, so the input
+#' is never held twice; an interrupt between batches stops the read.
+#' @noRd
+#' @keywords internal
+a5pyramid_leaves_arrow_rs <- function(holder, cell, names, types, reducers, weights, sd) .Call(wrap__a5pyramid_leaves_arrow_rs, holder, cell, names, types, reducers, weights, sd)
+
 #' Build a pyramid and return its rows.
 #' @noRd
 #' @keywords internal
-a5pyramid_build_rs <- function(cells, values, names, types, reducers, weights, lods, threads) .Call(wrap__a5pyramid_build_rs, cells, values, names, types, reducers, weights, lods, threads)
+a5pyramid_build_rs <- function(leaves, lods, threads) .Call(wrap__a5pyramid_build_rs, leaves, lods, threads)
 
 #' Build a pyramid and write it to `dest`; returns a summary.
 #' @noRd
 #' @keywords internal
-a5pyramid_write_rs <- function(cells, values, names, types, reducers, weights, lods, dest, tile_size, compression, meta_keys, meta_values, generator, threads) .Call(wrap__a5pyramid_write_rs, cells, values, names, types, reducers, weights, lods, dest, tile_size, compression, meta_keys, meta_values, generator, threads)
+a5pyramid_write_rs <- function(leaves, lods, dest, tile_size, compression, meta_keys, meta_values, generator, threads) .Call(wrap__a5pyramid_write_rs, leaves, lods, dest, tile_size, compression, meta_keys, meta_values, generator, threads)
 
 #' Build a pyramid, tile it, and export the tiles as an Arrow C stream:
 #' `holder` (an external pointer owning the stream until it is imported)
@@ -21,7 +49,24 @@ a5pyramid_write_rs <- function(cells, values, names, types, reducers, weights, l
 #' the stream is read.
 #' @noRd
 #' @keywords internal
-a5pyramid_arrow_rs <- function(cells, values, names, types, reducers, weights, lods, tile_size, meta_keys, meta_values, generator, threads) .Call(wrap__a5pyramid_arrow_rs, cells, values, names, types, reducers, weights, lods, tile_size, meta_keys, meta_values, generator, threads)
+a5pyramid_arrow_rs <- function(leaves, lods, tile_size, meta_keys, meta_values, generator, threads) .Call(wrap__a5pyramid_arrow_rs, leaves, lods, tile_size, meta_keys, meta_values, generator, threads)
+
+#' Build a pyramid and write it as a set of shard files in `dest`; returns
+#' the set's index.
+#' @noRd
+#' @keywords internal
+a5pyramid_write_set_rs <- function(leaves, lods, dest, tier_lod_min, tier_lod_max, tier_shard_resolution, tier_tile_size, compression, meta_keys, meta_values, generator, threads) .Call(wrap__a5pyramid_write_set_rs, leaves, lods, dest, tier_lod_min, tier_lod_max, tier_shard_resolution, tier_tile_size, compression, meta_keys, meta_values, generator, threads)
+
+#' The default tiers of a set with leaves at `data_resolution` and levels
+#' at `lods`.
+#' @noRd
+#' @keywords internal
+a5pyramid_default_tiers_rs <- function(data_resolution, lods) .Call(wrap__a5pyramid_default_tiers_rs, data_resolution, lods)
+
+#' The index of the set at `src` (its directory or `set.json`).
+#' @noRd
+#' @keywords internal
+a5pyramid_set_info_rs <- function(src) .Call(wrap__a5pyramid_set_info_rs, src)
 
 #' The index and Parquet layout of a pyramid file.
 #' @noRd

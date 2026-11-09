@@ -1,4 +1,4 @@
-# The a5pyramid file format, version 1
+# The a5pyramid file format, version 2
 
 An a5pyramid file is one Parquet file holding [A5](https://a5geo.org/) cells
 at one resolution (the *leaves*, with their values) and coarser *levels of
@@ -7,11 +7,24 @@ a web map reading it with [hyparquet](https://github.com/hyparam/hyparquet),
 fetches the footer and then only the row groups a view needs, with HTTP range
 requests.
 
+A pyramid too large for one file is stored as a *pyramid set*: a directory
+of a5pyramid files, *shards*, each holding some LODs of the cells around one
+coarse cell, and an index, `set.json` (see "Pyramid sets"). Version 2 adds
+sets; a single file is unchanged from version 1.
+
 The same layout also exists in memory as Arrow record batches (see "The
 Arrow form"), for clients that take a pyramid without a file.
 
 This document is the contract between writers (the `a5pyramid` crate and the
 R package built on it) and readers (renderers). Key words follow RFC 2119.
+
+## Versions
+
+A writer records in `format_version` the oldest version whose rules a file
+follows: 1 for a single file, 2 for a shard of a set. A reader that supports
+version 2 reads both; a version-1 reader refuses shards, as it must, because
+a shard breaks two version-1 rules: its finest level need not be the leaves,
+and its levels hold only the cells it owns.
 
 ## Reading a file
 
@@ -112,15 +125,16 @@ The index of a small file (1,024 leaves at resolution 15, levels at 11 and
 
 | Field | Meaning |
 |---|---|
-| `format_version` | This document's version. Readers MUST refuse newer versions. Fields added without a version change are optional, and readers MUST ignore fields they do not know. |
+| `format_version` | The oldest version of this document whose rules the file follows (see "Versions"). Readers MUST refuse newer versions. Fields added without a version change are optional, and readers MUST ignore fields they do not know. |
 | `generator` | The software that wrote the file. |
 | `a5_crate` | The version of the a5 Rust crate that computed the levels and boxes. |
-| `data_resolution` | The leaves' resolution, the finest level's `lod`. |
+| `data_resolution` | The leaves' resolution. In a single file it is the finest level's `lod`; a shard of a tier coarser than the leaves holds no level at it. |
 | `tile_size` | The most rows in a tile. |
-| `bbox` | `[west, south, east, north]` of the leaves (see "Boxes"). |
-| `columns` | The value columns in column order: `name`, storage `type` and `reducer` (see "Levels"). |
+| `bbox` | `[west, south, east, north]` (see "Boxes"): in a single file, of the leaves; in a shard, of every tile, since coarse cells reach past the leaves under them. |
+| `columns` | The value columns in column order: `name`, storage `type` and `reducer` (see "Levels"), and for a `rep_child` column `sd`, the standard deviation that scaled it (1 where the leaves' standard deviation is 0 or undefined, as for a constant column, so `sd` is the scale used rather than a statistic of the data). `sd` is optional (absent before 2026-11-09), and readers that do not choose representatives ignore it. |
 | `levels` | One entry per level, ascending `lod`: its `lod`, its number of `rows`, and the half-open range `[start, end)` of its tiles. Consecutive levels' ranges meet, and together cover every tile. |
 | `tile_bbox` | The box of every tile in order, flat: tile `i` is at indices `4i` to `4i + 3`. |
+| `shard` | Shards only (version 2): `{"tier", "cell", "resolution"}`, the shard's tier, its shard cell as 16 hex digits, and that cell's resolution. Absent in a single file. |
 
 Writers before 2026-11-09 named `tiles` `row_groups` and `tile_bbox`
 `row_group_bbox`, with the same meaning. Readers MAY accept those names.
@@ -145,7 +159,9 @@ A cell at LOD `r` summarises the leaves whose centres it contains
 (a5 `cell_to_supercell`), so every level partitions the leaves and `ncell`
 sums to the number of leaves in every level. Each level is grouped from the
 leaves directly: supercells do not chain, so a level aggregated from the level
-below would place some leaves in the wrong coarse cell.
+below would place some leaves in the wrong coarse cell. In a set the same
+holds of a level taken over all the shards of its tier; one shard holds only
+the cells it owns.
 
 Each value column is reduced over the leaves under each cell by its
 `reducer`:
@@ -155,7 +171,12 @@ Each value column is reduced over the leaves under each cell by its
 | `mean` | The mean, weighted by the leaves' weights when the writer had them. |
 | `sum`, `min`, `max` | The sum, minimum or maximum. |
 | `mode` | The most frequent value (by total weight), ties to the smallest. |
-| `rep_child` | The value of one *representative* leaf, the same leaf for every `rep_child` column: the leaf closest to the cell's mean over all `rep_child` columns, each scaled by its standard deviation over the leaves. Ties go to the lowest cell id. |
+| `rep_child` | The value of one *representative* leaf, the same leaf for every `rep_child` column: the leaf closest to the cell's mean over all `rep_child` columns, each divided by its standard deviation (the column's `sd`: over the leaves, or fixed by the writer). Ties go to the lowest cell id. |
+
+With `sd` computed over the leaves, a cell's representative depends on every
+leaf of the build, so pyramids of different parts of a region can choose
+differently for the same cell. Builds that must agree, such as parts of a
+region built one at a time, fix `sd` to the same values.
 
 Missing values are skipped; a cell whose leaves are all missing has a null
 value. Values are stored as their column's type at every level: integer types
@@ -189,6 +210,120 @@ Serialising the batches, for example as Arrow IPC, keeps this layout: an IPC
 file's record batches are the tiles, and its schema metadata the index. The
 encodings and statistics below are properties of the Parquet file only.
 
+## Pyramid sets
+
+A set stores one pyramid as many files, so that every file's footer stays
+small and a view opens only the files around it. A browser reads a file's
+whole footer before any tile, and the footer grows by a few hundred bytes a
+tile, so one file of 150 million leaves would have a footer of about 20 MB.
+
+### Tiers and shards
+
+The set's LODs are split into *tiers*: ranges of consecutive LODs that do not
+overlap and between them hold every level, the leaves included. Each tier has
+a *shard resolution* `s`, from 0 up to its coarsest LOD. A cell `C` of the
+tier belongs to the *shard* keyed by `cell_to_supercell(C, s)`, the cell at
+resolution `s` containing `C`'s centre (`C` itself when `s` is its
+resolution). So every cell of the pyramid is in exactly one shard. A shard's
+cells lie around its shard cell, and the coarse ones reach past it.
+
+Levels are grouped from all the leaves before the pyramid is split, so a
+coarse cell near a shard's edge summarises every leaf under it, whichever
+shards hold those leaves.
+
+Each shard is one a5pyramid file (format version 2) holding its tier's LODs
+for the cells it owns:
+
+- `levels` has one entry per LOD of the tier that the pyramid has, in
+  ascending order, each with the shard's rows at that LOD. A level can be
+  empty (`rows` 0, an empty range of tiles); a shard with no cells at all is
+  not written.
+- `data_resolution` is the leaves' resolution, also in shards whose tier is
+  coarser.
+- `bbox` covers every tile of the shard.
+- `shard` names the tier, the shard cell and its resolution.
+- Columns, tiles, encodings and key-value metadata are as for a single file.
+  Each shard carries the writer's other metadata entries.
+
+The tiers a writer chooses are its own. The a5pyramid writer's default, from
+the leaves down, puts three LODs in a tier with shard resolution 12 below the
+tier's finest LOD, and every LOD left over in one tier at shard resolution 0.
+A shard full of data then holds about 4^12 (16.8 M) cells at its finest LOD
+and a third as many again at its other two, and a map view, about 1,300 cells
+across at the LOD it draws, meets at most a few shards of that tier. For
+leaves at resolution 18: LODs 16 to 18 (shards at 6), 13 to 15 (at 3) and 2
+to 12 (at 0).
+
+### The directory
+
+```
+set.json
+tier=0/shard=<hex>.parquet
+tier=1/shard=<hex>.parquet
+...
+```
+
+`<hex>` is the shard cell, 16 hex digits. Readers SHOULD take paths from
+`set.json` rather than build them. A set has a directory of its own; files
+there that `set.json` does not list are not part of it. A writer writes
+`set.json` last, so a directory with an index holds every shard it lists.
+
+### set.json
+
+The index of a set of 1,024 leaves at resolution 15 in two tiers, with one
+of its six shards shown:
+
+```json
+{
+  "format": "a5pyramid-set",
+  "format_version": 2,
+  "generator": "a5pyramid 0.0.0.9000",
+  "a5_crate": "1.0.0",
+  "a5_index": "1.0",
+  "data_resolution": 15,
+  "columns": [{"name": "value", "type": "float32", "reducer": "mean"}],
+  "tiers": [
+    {"lods": [2, 12], "shard_resolution": 0, "tile_size": 16384},
+    {"lods": [13, 15], "shard_resolution": 10, "tile_size": 16384}
+  ],
+  "bbox": [-21.0, 49.98534, 15.0, 71.63832],
+  "shards": [
+    {"tier": 1, "cell": "6316008000000000", "path": "tier=1/shard=6316008000000000.parquet",
+     "rows": 162, "tiles": 3, "bytes": 2687, "footer_bytes": 1404,
+     "bbox": [-3.21943, 56.00456, -3.15593, 56.03745]}
+  ],
+  "metadata": {"app": "{\"k\":1}"}
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `format` | `"a5pyramid-set"`. Readers MUST refuse any other. |
+| `format_version` | 2, this document's version for sets. Readers MUST refuse newer versions. |
+| `generator`, `a5_crate`, `data_resolution`, `columns` | As in a shard's index, the same for every shard. |
+| `a5_index` | The A5 index version of every shard's ids, as in each shard's `a5_index` metadata. |
+| `tiers` | In ascending LOD order; a tier's number is its position, from 0. `lods` is inclusive. |
+| `bbox` | The box of every shard's box. |
+| `shards` | Every shard, by tier and then shard cell: `tier`; `cell` (16 hex digits); `path`, relative to the set's directory with `/` separators; `rows`; `tiles`; `bytes`, the file's size; `footer_bytes`; and `bbox`, the shard's box. |
+| `metadata` | The writer's other metadata, an object of strings. |
+
+`footer_bytes` counts from the end of the last column chunk to the end of
+the file: the Parquet metadata (the shard's index included), its 4-byte
+length and the closing `PAR1`. A reader that fetches the last
+`footer_bytes` bytes has the whole footer in one request.
+
+### Reading a set
+
+1. Fetch `set.json`. Refuse it if `format` is not `"a5pyramid-set"`,
+   `format_version` is newer than the reader supports, or `a5_index` is not
+   the reader's A5 index version.
+2. Pick a LOD for the view, as for a single file, and the tier holding it.
+3. Take the tier's shards whose `bbox` meets the viewport, and open each
+   (once; cache it): fetch its last `footer_bytes` bytes and read its index.
+4. In each, take the level's tiles whose boxes meet the viewport and fetch
+   them, as in a single file. Tiles of different shards never hold the same
+   cell.
+
 ## Reading with hyparquet
 
 ```js
@@ -198,7 +333,7 @@ const file = await asyncBufferFromUrl({ url });
 const metadata = await parquetMetadataAsync(file);
 const kv = Object.fromEntries(metadata.key_value_metadata.map((e) => [e.key, e.value]));
 const index = JSON.parse(kv.a5pyramid);
-if (index.format_version > 1 || kv.a5_index !== "1.0") throw new Error("unsupported pyramid");
+if (index.format_version > 2 || kv.a5_index !== "1.0") throw new Error("unsupported pyramid");
 
 // row offsets of each tile (row group)
 const rowStart = [0];
@@ -224,6 +359,10 @@ async function rowsInView(lod, view /* [west, south, east, north] */) {
 }
 ```
 
-The R package's test suite reads files this way under Node
+A shard opens the same way; with its `footer_bytes` from `set.json`,
+`parquetMetadataAsync(file, { initialFetchSize: footer_bytes })` reads the
+footer in one request.
+
+The R package's test suite reads files and shards this way under Node
 (`tests/testthat/js/read-hyparquet.mjs`) and checks the rows, and that only
 the footer and the requested tile's bytes are fetched.

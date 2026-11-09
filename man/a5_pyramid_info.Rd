@@ -20,8 +20,10 @@ the file) and \code{a5_index} (the A5 index version of its ids).
 LOD, ascending, the leaves last.
 \item \code{tile_size}: the most rows in a tile.
 \item \code{bbox}: \code{c(xmin, ymin, xmax, ymax)} of the leaves.
-\item \code{columns}: a tibble of the value columns' \code{name}, \code{type} and
-\code{reducer}.
+\item \code{columns}: a tibble of the value columns' \code{name}, \code{type},
+\code{reducer} and \code{sd}, the standard deviation that scaled a
+\code{"rep_child"} column (1 where the leaves' standard deviation is 0 or
+undefined; \code{NA} for other reducers and older files).
 \item \code{levels}: a tibble of each level's \code{lod}, \code{rows} and number of
 \code{tiles}.
 \item \code{tiles}: a tibble with one row per tile, which is one row group of
@@ -30,6 +32,9 @@ readers count), \code{lod}, \code{rows}, \code{bytes} (compressed size, what a
 reader fetches) and \code{xmin}, \code{ymin}, \code{xmax}, \code{ymax}.
 \item \code{metadata}: the file's other key-value metadata, a named character
 vector.
+\item \code{shard}: for a shard of a pyramid set (format version 2, written by
+\code{\link[=a5_write_pyramid_set]{a5_write_pyramid_set()}}), a list of its \code{tier}, shard \code{cell} (hex)
+and its shard \code{resolution}; \code{NULL} for a single file.
 }
 }
 \description{

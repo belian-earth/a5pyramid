@@ -104,6 +104,9 @@ pub fn build(leaves: Leaves, lods: &[i32], cancel: &Cancel) -> Result<Pyramid> {
     }
 
     let rep = RepSpec::new(&columns);
+    for (&k, &sd) in rep.cols.iter().zip(&rep.sds) {
+        columns[k].spec.sd = Some(sd);
+    }
     // finest first, so the largest groupings (and any error) come early
     lods.sort_unstable_by(|a, b| b.cmp(a));
     let mut levels = Vec::with_capacity(lods.len() + 1);
@@ -146,6 +149,18 @@ fn check_columns(columns: &[Column], n: usize) -> Result<()> {
                 "value column {name:?} has {} values for {n} cells",
                 col.values.len()
             )));
+        }
+        if let Some(sd) = col.spec.sd {
+            if col.spec.reducer != Reducer::RepChild {
+                return Err(invalid(format!(
+                    "value column {name:?} has a standard deviation, which only rep_child columns use"
+                )));
+            }
+            if !(sd > 0.0 && sd.is_finite()) {
+                return Err(invalid(format!(
+                    "the standard deviation of value column {name:?} must be positive and finite, not {sd}"
+                )));
+            }
         }
     }
     Ok(())
@@ -215,8 +230,11 @@ fn check_lods(lods: &[i32], data_resolution: i32) -> Result<Vec<i32>> {
 type LeafParts = (Vec<u64>, Vec<Column>, Option<Vec<f64>>);
 
 /// Leaves in ascending cell order (input already in order is used as is),
-/// with duplicates rejected.
-fn sort_leaves(cells: Vec<u64>, columns: Vec<Column>, weights: Option<Vec<f64>>) -> Result<LeafParts> {
+/// with duplicates rejected. Sorting needs 16 bytes a leaf for the
+/// (cell, row) pairs and 4 for the row order; the cells are rewritten in
+/// place and the columns gathered one at a time, so at most one column is
+/// held twice.
+fn sort_leaves(mut cells: Vec<u64>, columns: Vec<Column>, weights: Option<Vec<f64>>) -> Result<LeafParts> {
     if cells.par_windows(2).all(|w| w[0] < w[1]) {
         return Ok((cells, columns, weights));
     }
@@ -232,23 +250,30 @@ fn sort_leaves(cells: Vec<u64>, columns: Vec<Column>, weights: Option<Vec<f64>>)
             a.max(b) + 1
         )));
     }
-    let gather = |v: &[f64]| -> Vec<f64> { order.par_iter().map(|&(_, i)| v[i as usize]).collect() };
-    let sorted_cells = order.par_iter().map(|&(c, _)| c).collect();
+    cells
+        .par_iter_mut()
+        .zip(order.par_iter())
+        .for_each(|(c, &(k, _))| *c = k);
+    let rows: Vec<u32> = order.par_iter().map(|&(_, i)| i).collect();
+    drop(order);
+    let gather = |v: Vec<f64>| -> Vec<f64> { rows.par_iter().map(|&i| v[i as usize]).collect() };
     let columns = columns
         .into_iter()
         .map(|c| Column {
-            values: gather(&c.values),
+            values: gather(c.values),
             spec: c.spec,
         })
         .collect();
-    let weights = weights.map(|w| gather(&w));
-    Ok((sorted_cells, columns, weights))
+    let weights = weights.map(gather);
+    Ok((cells, columns, weights))
 }
 
-/// The `RepChild` columns and the scale (1 / standard deviation over the
-/// leaves) that puts each on a common footing in the distance to the mean.
+/// The `RepChild` columns and the scale (1 / standard deviation, given or
+/// over the leaves) that puts each on a common footing in the distance to
+/// the mean.
 struct RepSpec {
     cols: Vec<usize>,
+    sds: Vec<f64>,
     scales: Vec<f64>,
 }
 
@@ -260,16 +285,20 @@ impl RepSpec {
             .filter(|(_, c)| c.spec.reducer == Reducer::RepChild)
             .map(|(k, _)| k)
             .collect();
-        let scales = cols.iter().map(|&k| inverse_sd(&columns[k].values)).collect();
-        Self { cols, scales }
+        let sds: Vec<f64> = cols
+            .iter()
+            .map(|&k| columns[k].spec.sd.unwrap_or_else(|| leaf_sd(&columns[k].values)))
+            .collect();
+        let scales = sds.iter().map(|sd| 1.0 / sd).collect();
+        Self { cols, sds, scales }
     }
 }
 
-/// 1 / the standard deviation of the non-missing values, or 1 when that is
+/// The standard deviation of the non-missing values, or 1 when that is
 /// zero or undefined (a constant column adds nothing to any distance).
 /// Sums run over fixed chunks combined in order, so the scale, and with it
 /// every choice of representative, is the same on any number of threads.
-fn inverse_sd(v: &[f64]) -> f64 {
+fn leaf_sd(v: &[f64]) -> f64 {
     const CHUNK: usize = 1 << 16;
     let sum_chunks = |f: &(dyn Fn(f64) -> f64 + Sync)| -> (usize, f64) {
         let parts: Vec<(usize, f64)> = v
@@ -290,7 +319,7 @@ fn inverse_sd(v: &[f64]) -> f64 {
     let (_, ss) = sum_chunks(&|x| (x - mean) * (x - mean));
     let sd = (ss / (n - 1) as f64).sqrt();
     if sd > 0.0 && sd.is_finite() {
-        1.0 / sd
+        sd
     } else {
         1.0
     }
@@ -304,33 +333,32 @@ fn build_level(
     lod: i32,
     cancel: &Cancel,
 ) -> Result<Level> {
-    let mut pairs: Vec<(u64, u32)> = cells
-        .par_iter()
-        .enumerate()
-        .map(|(i, &c)| a5::cell_to_supercell(c, lod).map(|p| (p, i as u32)))
-        .collect::<std::result::Result<_, String>>()
-        .map_err(Error::A5)?;
+    let mut pairs = supercell_rows(cells, lod)?;
     cancel.check()?;
     // (parent, leaf) is a total order, so groups and the leaves within them
     // come out the same whatever the thread count
     pairs.par_sort_unstable();
     cancel.check()?;
 
-    let mut starts = Vec::with_capacity(cells.len() / 2 + 2);
-    starts.push(0usize);
+    // where each group starts, as u32: a pyramid holds fewer than 2^32 leaves
+    let mut starts: Vec<u32> = Vec::new();
+    starts.push(0);
     for k in 1..pairs.len() {
         if pairs[k].0 != pairs[k - 1].0 {
-            starts.push(k);
+            starts.push(k as u32);
         }
     }
-    starts.push(pairs.len());
+    starts.push(pairs.len() as u32);
     let n_groups = starts.len() - 1;
-    let group = |g: usize| &pairs[starts[g]..starts[g + 1]];
+    let group = |g: usize| &pairs[starts[g] as usize..starts[g + 1] as usize];
 
-    let out_cells: Vec<u64> = (0..n_groups).into_par_iter().map(|g| pairs[starts[g]].0).collect();
+    let out_cells: Vec<u64> = (0..n_groups)
+        .into_par_iter()
+        .map(|g| pairs[starts[g] as usize].0)
+        .collect();
     let ncell: Vec<u32> = (0..n_groups)
         .into_par_iter()
-        .map(|g| (starts[g + 1] - starts[g]) as u32)
+        .map(|g| starts[g + 1] - starts[g])
         .collect();
 
     let rep_leaf: Vec<u32> = if rep.cols.is_empty() {
@@ -372,6 +400,23 @@ fn build_level(
         ncell,
         values,
     })
+}
+
+/// (supercell at `res`, row) for every cell, in row order. Filled in place:
+/// collecting fallible results would hold the pairs twice while they are
+/// joined.
+pub(crate) fn supercell_rows(cells: &[u64], res: i32) -> Result<Vec<(u64, u32)>> {
+    let mut pairs = vec![(0u64, 0u32); cells.len()];
+    pairs
+        .par_iter_mut()
+        .zip(cells.par_iter())
+        .enumerate()
+        .try_for_each(|(i, (p, &c))| {
+            *p = (a5::cell_to_supercell(c, res)?, i as u32);
+            Ok::<(), String>(())
+        })
+        .map_err(Error::A5)?;
+    Ok(pairs)
 }
 
 #[inline]
@@ -599,6 +644,82 @@ mod tests {
     }
 
     #[test]
+    fn rep_child_records_its_scale_and_a_given_one_is_used() {
+        let cells = grid(11, (20.0, 20.4), (-5.0, -4.6), 200);
+        let n = cells.len();
+        let r: Vec<f64> = (0..n).map(|i| ((i * 37) % 256) as f64).collect();
+        let g: Vec<f64> = (0..n).map(|i| ((i * 91) % 256) as f64).collect();
+        let mk = |sd: Option<(f64, f64)>| {
+            let (mut a, mut b) = (
+                Column::new("r", ColumnType::UInt8, Reducer::RepChild, r.clone()),
+                Column::new("g", ColumnType::UInt8, Reducer::RepChild, g.clone()),
+            );
+            if let Some((x, y)) = sd {
+                a = a.with_sd(x);
+                b = b.with_sd(y);
+            }
+            let m = Column::new("m", ColumnType::Float64, Reducer::Mean, r.clone());
+            build(leaves_with(cells.clone(), vec![a, b, m]), &[7], &Cancel::new()).unwrap()
+        };
+        let computed = mk(None);
+        let sds: Vec<Option<f64>> = computed.columns.iter().map(|c| c.sd).collect();
+        assert!(sds[0].unwrap() > 0.0 && sds[1].unwrap() > 0.0 && sds[2].is_none());
+        assert_eq!(sds[0], Some(leaf_sd(&r)));
+        // the computed scales, given, choose the same leaves
+        assert_eq!(mk(Some((sds[0].unwrap(), sds[1].unwrap()))), computed);
+        // a scale that all but drops g picks the leaf closest in r alone
+        let lopsided = mk(Some((1.0, 1e9)));
+        assert_eq!(lopsided.columns[1].sd, Some(1e9));
+        assert_ne!(lopsided.levels[0].values, computed.levels[0].values);
+    }
+
+    #[test]
+    fn a_fixed_scale_makes_a_cell_depend_on_its_own_leaves_only() {
+        // the same region built whole and with a part of it left out: with
+        // the scale fixed, every coarse cell whose leaves are all in the
+        // part picks the same representative
+        let cells = grid(11, (20.0, 20.6), (-5.0, -4.6), 260);
+        let n = cells.len();
+        let v: Vec<f64> = (0..n).map(|i| (((i * 2654435761) % 1000) as f64).sqrt()).collect();
+        let w: Vec<f64> = (0..n).map(|i| ((i * 40503) % 977) as f64).collect();
+        let part: Vec<usize> = (0..n)
+            .filter(|&i| a5::cell_to_lonlat(cells[i]).unwrap().longitude() < 20.3)
+            .collect();
+        let mk = |rows: &[usize], sd: Option<f64>| {
+            let col = |name: &str, x: &[f64]| {
+                let c = Column::new(
+                    name,
+                    ColumnType::Float64,
+                    Reducer::RepChild,
+                    rows.iter().map(|&i| x[i]).collect(),
+                );
+                sd.map_or(c.clone(), |s| c.with_sd(s))
+            };
+            let cells = rows.iter().map(|&i| cells[i]).collect();
+            build(
+                leaves_with(cells, vec![col("v", &v), col("w", &w)]),
+                &[6],
+                &Cancel::new(),
+            )
+            .unwrap()
+        };
+        let all: Vec<usize> = (0..n).collect();
+        let same = |whole: &Pyramid, sub: &Pyramid| {
+            let (a, b) = (&whole.levels[0], &sub.levels[0]);
+            let mut agree = 0;
+            for (k, &c) in b.cells.iter().enumerate() {
+                let j = a.cells.binary_search(&c).unwrap();
+                if a.ncell[j] == b.ncell[k] {
+                    assert_eq!((a.values[0][j], a.values[1][j]), (b.values[0][k], b.values[1][k]));
+                    agree += 1;
+                }
+            }
+            agree
+        };
+        assert!(same(&mk(&all, Some(10.0)), &mk(&part, Some(10.0))) > 0);
+    }
+
+    #[test]
     fn ties_go_to_the_lowest_cell() {
         // two leaves per group, equally far from their mean
         let cells = grid(10, (3.0, 3.4), (40.0, 40.3), 120);
@@ -702,6 +823,14 @@ mod tests {
         assert!(build(leaves_with(cells.clone(), vec![short]), &[], &cancel).is_err());
         let reserved = Column::new("lod", ColumnType::Float64, Reducer::Mean, vec![1.0; cells.len()]);
         assert!(build(leaves_with(cells.clone(), vec![reserved]), &[], &cancel).is_err());
+        for (reducer, sd) in [
+            (Reducer::Mean, 1.0),
+            (Reducer::RepChild, 0.0),
+            (Reducer::RepChild, f64::NAN),
+        ] {
+            let col = Column::new("v", ColumnType::Float64, reducer, vec![1.0; cells.len()]).with_sd(sd);
+            assert!(build(leaves_with(cells.clone(), vec![col]), &[], &cancel).is_err());
+        }
         let stop = Cancel::new();
         stop.cancel();
         assert!(matches!(

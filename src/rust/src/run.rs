@@ -32,7 +32,7 @@ unsafe extern "C" fn check_interrupt(_: *mut std::ffi::c_void) {
 /// Whether the user has asked R to interrupt. `R_CheckUserInterrupt()`
 /// jumps out when an interrupt is pending; `R_ToplevelExec()` catches the
 /// jump and reports it as `FALSE`. Must run on R's main thread.
-fn interrupt_pending() -> bool {
+pub(crate) fn interrupt_pending() -> bool {
     unsafe { R_ToplevelExec(check_interrupt, std::ptr::null_mut()) == 0 }
 }
 
