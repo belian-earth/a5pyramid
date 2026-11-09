@@ -21,9 +21,10 @@ navbar:
       aria-label: GitHub
 reference:
 - title: Building pyramids
-  desc: Aggregate A5 cells to coarser levels of detail, in memory or to Parquet.
+  desc: Aggregate A5 cells to coarser levels of detail, as a tibble, an Arrow table or a Parquet file.
   contents:
   - a5_pyramid
+  - a5_pyramid_arrow
   - a5_write_pyramid
 - title: Reading pyramids
   desc: A file's index and levels, read as a renderer reads them.

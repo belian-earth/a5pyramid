@@ -4,7 +4,8 @@
 use std::time::Instant;
 
 use a5pyramid::{
-    build, default_lods, write_parquet, Cancel, Column, ColumnType, Leaves, PyramidFile, Reducer, WriteOptions,
+    build, default_lods, write_parquet, Cancel, Column, ColumnType, Leaves, ParquetOptions, PyramidFile, Reducer,
+    TileOptions, TiledPyramid,
 };
 
 fn main() {
@@ -46,13 +47,22 @@ fn main() {
             let t_build = t.elapsed();
             let path = std::env::temp_dir().join("a5pyramid-bench.parquet");
             let t = Instant::now();
-            let s = write_parquet(&p, &path, &WriteOptions::default(), &Cancel::new()).unwrap();
+            let tiled = TiledPyramid::new(p, &TileOptions::default(), &Cancel::new()).unwrap();
+            let t_tile = t.elapsed();
+            let t = Instant::now();
+            let batches: usize = tiled.batches().map(|b| b.unwrap().num_rows()).sum();
+            let t_arrow = t.elapsed();
+            let t = Instant::now();
+            let s = write_parquet(&tiled, &path, &ParquetOptions::default(), &Cancel::new()).unwrap();
             let t_write = t.elapsed();
+            assert_eq!(batches as u64, s.rows);
             let f = PyramidFile::open(&path).unwrap();
             println!(
-                "{:>9}: build {:.3}s write {:.3}s | rows {} row groups {} file {:.2} MB footer {:.1} KB",
+                "{:>9}: build {:.3}s tile {:.3}s arrow {:.3}s parquet {:.3}s | rows {} tiles {} file {:.2} MB footer {:.1} KB",
                 reducer.as_str(),
                 t_build.as_secs_f64(),
+                t_tile.as_secs_f64(),
+                t_arrow.as_secs_f64(),
                 t_write.as_secs_f64(),
                 s.rows,
                 f.n_row_groups(),

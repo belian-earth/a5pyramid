@@ -121,32 +121,10 @@ impl PyramidFile {
     }
 
     /// The row groups at `lods` (all levels when `None`) whose boxes meet
-    /// `bbox` (everywhere when `None`), in file order. Every LOD must be one
-    /// of the file's.
+    /// `bbox` (everywhere when `None`), in file order; see
+    /// [`PyramidMeta::select`].
     pub fn select(&self, lods: Option<&[i32]>, bbox: Option<&Bbox>) -> Result<Vec<usize>> {
-        let levels: Vec<_> = match lods {
-            None => self.meta.levels.iter().collect(),
-            Some(lods) => {
-                let mut out = Vec::new();
-                for &lod in lods {
-                    let level = self.meta.levels.iter().find(|l| l.lod == lod).ok_or_else(|| {
-                        invalid(format!(
-                            "the file has no LOD {lod}; its LODs are {:?}",
-                            self.meta.lods()
-                        ))
-                    })?;
-                    out.push(level);
-                }
-                out.sort_by_key(|l| l.row_groups[0]);
-                out.dedup_by_key(|l| l.lod);
-                out
-            }
-        };
-        Ok(levels
-            .into_iter()
-            .flat_map(|l| l.row_groups[0]..l.row_groups[1])
-            .filter(|&rg| bbox.is_none_or(|b| self.meta.row_group_bbox(rg).intersects(b)))
-            .collect())
+        self.meta.select(lods, bbox)
     }
 
     /// Decode `row_groups` (in file order) as record batches.
@@ -193,7 +171,7 @@ fn check_schema(arrow: &ArrowReaderMetadata, meta: &PyramidMeta) -> Result<()> {
 mod tests {
     use super::*;
     use crate::testutil::grid;
-    use crate::{build, write_parquet, Cancel, Column, Leaves, Reducer, WriteOptions};
+    use crate::{build, write_parquet, Cancel, Column, Leaves, ParquetOptions, Reducer, TileOptions, TiledPyramid};
     use arrow_array::cast::AsArray;
     use arrow_array::types::{Float64Type, UInt64Type, UInt8Type};
     use arrow_array::Array;
@@ -213,13 +191,14 @@ mod tests {
         };
         let p = build(leaves, &crate::default_lods(13), &Cancel::new()).unwrap();
         let path = dir.join("p.parquet");
-        let opts = WriteOptions {
+        let opts = TileOptions {
             tile_size: 1000,
             metadata: vec![("app".into(), "{}".into())],
             ..Default::default()
         };
-        write_parquet(&p, &path, &opts, &Cancel::new()).unwrap();
-        (path, p)
+        let tiled = TiledPyramid::new(p, &opts, &Cancel::new()).unwrap();
+        write_parquet(&tiled, &path, &ParquetOptions::default(), &Cancel::new()).unwrap();
+        (path, tiled.into_pyramid())
     }
 
     fn tempdir(name: &str) -> PathBuf {

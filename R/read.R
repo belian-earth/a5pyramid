@@ -16,15 +16,16 @@
 #'     the file) and `a5_index` (the A5 index version of its ids).
 #'   - `data_resolution`: the leaves' resolution. `lods`: every level's
 #'     LOD, ascending, the leaves last.
-#'   - `tile_size`: the most rows in a row group.
+#'   - `tile_size`: the most rows in a tile.
 #'   - `bbox`: `c(xmin, ymin, xmax, ymax)` of the leaves.
 #'   - `columns`: a tibble of the value columns' `name`, `type` and
 #'     `reducer`.
-#'   - `levels`: a tibble of each level's `lod`, `rows` and `row_groups`.
-#'   - `row_groups`: a tibble with one row per row group: `row_group` (its
-#'     0-based index in the file, as Parquet readers count), `lod`, `rows`,
-#'     `bytes` (compressed size, what a reader fetches) and `xmin`, `ymin`,
-#'     `xmax`, `ymax`.
+#'   - `levels`: a tibble of each level's `lod`, `rows` and number of
+#'     `tiles`.
+#'   - `tiles`: a tibble with one row per tile, which is one row group of
+#'     the file: `tile` (its 0-based index, the row group's index as Parquet
+#'     readers count), `lod`, `rows`, `bytes` (compressed size, what a
+#'     reader fetches) and `xmin`, `ymin`, `xmax`, `ymax`.
 #'   - `metadata`: the file's other key-value metadata, a named character
 #'     vector.
 #' @seealso [a5_read_pyramid()] to read rows.
@@ -42,8 +43,8 @@
 a5_pyramid_info <- function(src) {
   src <- check_src(src)
   r <- rs_call(a5pyramid_info_rs(src))
-  rg <- r$row_groups
-  rg_lon <- stack_lon(rg$west, rg$east)
+  tiles <- r$tiles
+  tile_lon <- stack_lon(tiles$west, tiles$east)
   bbox_lon <- stack_lon(r$bbox[1], r$bbox[3])
   meta <- r$metadata$value
   names(meta) <- r$metadata$key
@@ -64,17 +65,17 @@ a5_pyramid_info <- function(src) {
       levels = tibble::tibble(
         lod = r$levels$lod,
         rows = r$levels$rows,
-        row_groups = r$levels$rg_end - r$levels$rg_start
+        tiles = r$levels$tile_end - r$levels$tile_start
       ),
-      row_groups = tibble::tibble(
-        row_group = seq_along(rg$lod) - 1L,
-        lod = rg$lod,
-        rows = rg$rows,
-        bytes = rg$bytes,
-        xmin = rg_lon$xmin,
-        ymin = rg$south,
-        xmax = rg_lon$xmax,
-        ymax = rg$north
+      tiles = tibble::tibble(
+        tile = seq_along(tiles$lod) - 1L,
+        lod = tiles$lod,
+        rows = tiles$rows,
+        bytes = tiles$bytes,
+        xmin = tile_lon$xmin,
+        ymin = tiles$south,
+        xmax = tile_lon$xmax,
+        ymax = tiles$north
       ),
       metadata = meta
     ),
@@ -103,7 +104,7 @@ print.a5pyramid_info <- function(x, ...) {
     "Leaves" = paste0("resolution ", x$data_resolution, ", ", format(utils::tail(x$levels$rows, 1), big.mark = ","), " cells"),
     "LODs" = lods,
     "Rows" = format(sum(x$levels$rows), big.mark = ","),
-    "Row groups" = paste0(format(nrow(x$row_groups), big.mark = ","), " (tile size ", x$tile_size, ")"),
+    "Tiles" = paste0(format(nrow(x$tiles), big.mark = ","), " row groups (tile size ", x$tile_size, ")"),
     "Columns" = cols,
     "Bbox" = paste(b, collapse = ", "),
     "Written by" = paste0(x$generator, ", a5 crate ", x$a5_crate)
@@ -119,10 +120,10 @@ format_bytes <- function(b) {
 
 #' Read levels of a pyramid file
 #'
-#' Reads the rows of the row groups at `lod` whose bounding boxes meet
-#' `bbox`, as a renderer does for a view: the footer first, then only those
-#' row groups. Selection is by row group, so rows of a selected tile that
-#' lie outside `bbox` are returned too; filter the cells afterwards for an
+#' Reads the rows of the tiles at `lod` whose bounding boxes meet `bbox`,
+#' as a renderer does for a view: the footer first, then only those tiles'
+#' row groups. Selection is by tile, so rows of a selected tile that lie
+#' outside `bbox` are returned too; filter the cells afterwards for an
 #' exact cut.
 #'
 #' @param src Path of a pyramid Parquet file written by [a5_write_pyramid()].
@@ -133,7 +134,7 @@ format_bytes <- function(b) {
 #'   `xmin > xmax`, such as `c(179, -1, -179, 1)`.
 #' @returns A tibble with the columns of [a5_pyramid()], in file order:
 #'   ascending LOD, then cell id.
-#' @seealso [a5_pyramid_info()] for the file's levels and row groups.
+#' @seealso [a5_pyramid_info()] for the file's levels and tiles.
 #' @export
 #' @examples
 #' library(a5R)

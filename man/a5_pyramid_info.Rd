@@ -18,15 +18,16 @@ included).
 the file) and \code{a5_index} (the A5 index version of its ids).
 \item \code{data_resolution}: the leaves' resolution. \code{lods}: every level's
 LOD, ascending, the leaves last.
-\item \code{tile_size}: the most rows in a row group.
+\item \code{tile_size}: the most rows in a tile.
 \item \code{bbox}: \code{c(xmin, ymin, xmax, ymax)} of the leaves.
 \item \code{columns}: a tibble of the value columns' \code{name}, \code{type} and
 \code{reducer}.
-\item \code{levels}: a tibble of each level's \code{lod}, \code{rows} and \code{row_groups}.
-\item \code{row_groups}: a tibble with one row per row group: \code{row_group} (its
-0-based index in the file, as Parquet readers count), \code{lod}, \code{rows},
-\code{bytes} (compressed size, what a reader fetches) and \code{xmin}, \code{ymin},
-\code{xmax}, \code{ymax}.
+\item \code{levels}: a tibble of each level's \code{lod}, \code{rows} and number of
+\code{tiles}.
+\item \code{tiles}: a tibble with one row per tile, which is one row group of
+the file: \code{tile} (its 0-based index, the row group's index as Parquet
+readers count), \code{lod}, \code{rows}, \code{bytes} (compressed size, what a
+reader fetches) and \code{xmin}, \code{ymin}, \code{xmax}, \code{ymax}.
 \item \code{metadata}: the file's other key-value metadata, a named character
 vector.
 }

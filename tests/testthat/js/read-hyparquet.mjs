@@ -33,14 +33,14 @@ const rowEnd = rowStart + Number(metadata.row_groups[rg].num_rows);
 const rows = await hp.parquetReadObjects({ file: asyncBuffer, metadata, rowStart, rowEnd });
 
 const hex = (v) => (typeof v === "bigint" ? v : BigInt(v)).toString(16).padStart(16, "0");
-const level = index.levels.find((l) => rg >= l.row_groups[0] && rg < l.row_groups[1]);
+const level = index.levels.find((l) => rg >= l.tiles[0] && rg < l.tiles[1]);
 const out = {
   a5_index: kv.a5_index,
   format_version: index.format_version,
   lods: index.levels.map((l) => l.lod),
   level_lod: level.lod,
   n_row_groups: metadata.row_groups.length,
-  bbox: index.row_group_bbox.slice(4 * rg, 4 * rg + 4),
+  bbox: index.tile_bbox.slice(4 * rg, 4 * rg + 4),
   cell_type: typeof rows[0].cell,
   cells: rows.map((r) => hex(r.cell)),
   lod: rows.map((r) => Number(r.lod)),

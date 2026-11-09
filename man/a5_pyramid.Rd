@@ -131,5 +131,6 @@ a5_pyramid(
 )
 }
 \seealso{
-\code{\link[=a5_write_pyramid]{a5_write_pyramid()}} to write the pyramid for a browser.
+\code{\link[=a5_write_pyramid]{a5_write_pyramid()}} to write the pyramid for a browser,
+\code{\link[=a5_pyramid_arrow]{a5_pyramid_arrow()}} for the same tiles as an Arrow table.
 }

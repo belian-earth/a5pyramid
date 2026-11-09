@@ -20,10 +20,10 @@ A tibble with the columns of \code{\link[=a5_pyramid]{a5_pyramid()}}, in file or
 ascending LOD, then cell id.
 }
 \description{
-Reads the rows of the row groups at \code{lod} whose bounding boxes meet
-\code{bbox}, as a renderer does for a view: the footer first, then only those
-row groups. Selection is by row group, so rows of a selected tile that
-lie outside \code{bbox} are returned too; filter the cells afterwards for an
+Reads the rows of the tiles at \code{lod} whose bounding boxes meet \code{bbox},
+as a renderer does for a view: the footer first, then only those tiles'
+row groups. Selection is by tile, so rows of a selected tile that lie
+outside \code{bbox} are returned too; filter the cells afterwards for an
 exact cut.
 }
 \examples{
@@ -37,5 +37,5 @@ a5_read_pyramid(path, lod = 12)
 a5_read_pyramid(path, lod = 15, bbox = c(-3.2, 55.94, -3.18, 55.96))
 }
 \seealso{
-\code{\link[=a5_pyramid_info]{a5_pyramid_info()}} for the file's levels and row groups.
+\code{\link[=a5_pyramid_info]{a5_pyramid_info()}} for the file's levels and tiles.
 }
