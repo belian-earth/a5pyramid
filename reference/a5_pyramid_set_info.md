@@ -33,7 +33,8 @@ A list of class `a5pyramid_set_info`:
 - `columns`: a tibble of the value columns' `name`, `type`, `reducer`
   and `sd`, the standard deviation that scaled a `"rep_child"` column (1
   where the leaves' standard deviation is 0 or undefined; `NA` for other
-  reducers and older files).
+  reducers and older files), and `dim`, the elements per cell of a
+  vector column (`NA` for scalar columns).
 
 - `tiers`: a tibble with one row per tier: `tier` (from 0), `lod_min`,
   `lod_max`, `shard_resolution`, `tile_size`, and its `shards`, `rows`

@@ -2,6 +2,23 @@
 
 ## a5pyramid (development version)
 
+- Vector columns (format version 3): a fixed number of `int8` or `uint8`
+  values per cell, such as a 64-element embedding, from an integer
+  matrix column of a data frame or a fixed-size list (DuckDB’s
+  `TINYINT[64]`) in Arrow data. The engine holds one byte an element;
+  files store the vector as one fixed-length binary column, so its
+  footer and requests grow like one column’s, not 64. Vectors are
+  reduced by `rep_child` with one standard deviation over all their
+  elements (fixed by `rep_sd`), together with any scalar `rep_child`
+  columns.
+  [`a5_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid.md)
+  and
+  [`a5_read_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_read_pyramid.md)
+  return them as integer matrix columns; `columns$dim` in the info
+  functions. Files and sets without vector columns keep versions 1
+  and 2. In the crate: `VectorColumn`, `VectorSpec`, `Leaves::vectors`,
+  `Level::vectors`.
+
 - Pyramid sets:
   [`a5_write_pyramid_set()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid_set.md)
   writes one pyramid as a directory of small files, *shards*, with an
@@ -19,6 +36,7 @@
   reads the index. A write that fails or is interrupted removes what it
   wrote, so it can be run again into the same directory. In the crate:
   `write_set()`, `SetMeta`, `Tier` and `default_tiers()`.
+
 - Format version 2 (`FORMAT.md`, “Pyramid sets”): shards are a5pyramid
   files whose index records the `shard` (tier, shard cell, resolution),
   whose finest level need not be the leaves, and whose `bbox` covers
@@ -27,6 +45,7 @@
   reads them as before; readers of this version read both.
   [`a5_pyramid_info()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_info.md)
   returns the `shard` and prints a shard as one.
+
 - Arrow data as input: `x` may be an Arrow `Table`, `RecordBatch`,
   `RecordBatchReader`, `Dataset` or query with one `uint64` cell column.
   It is read into the engine batch by batch through the Arrow C stream
@@ -34,6 +53,7 @@
   [`arrow::open_dataset()`](https://arrow.apache.org/docs/r/reference/open_dataset.html)
   over Parquet files holds no copy of the leaves in R; value columns
   default to their own Arrow types.
+
 - `rep_sd` fixes the standard deviations that scale `"rep_child"`
   columns, so pyramids of separate parts of a region choose a cell’s
   representative from its own leaves alone. The standard deviations
@@ -42,6 +62,7 @@
   [`a5_pyramid_info()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_info.md)
   and
   [`a5_pyramid_set_info()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_set_info.md).
+
 - Builds need less memory: sorting the leaves rewrites the cells in
   place and gathers one column at a time, levels and shards are grouped
   without holding their row pairs twice, and shard rows are grouped by a
@@ -49,10 +70,12 @@
   million res-18 leaves, three bands) peaks at 13.3 GB from a data
   frame, down from 21.2 GB, and at 9.3 GB from an Arrow `Dataset`, with
   identical shards.
+
 - First version: a Rust engine, with R bindings, that builds
   level-of-detail pyramids of A5 cells and writes them to one Parquet
   file for browser rendering. It replaces the R implementation in a5view
   0.3.
+
 - [`a5_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid.md)
   builds the levels and returns them as a tibble;
   [`a5_write_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid.md)
@@ -66,6 +89,7 @@
   cell id; a5view used unscaled distances and let rounding break ties.
   Columns take a storage type (`"uint8"` to `"float64"`) shared by every
   level.
+
 - [`a5_pyramid_arrow()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_arrow.md)
   returns the tiles of a pyramid in memory as an Arrow table, one record
   batch per tile, with the index in the schema metadata: the file’s
@@ -73,16 +97,20 @@
   stream interface, so no value passes through R. Record batch `i` holds
   the rows of row group `i` of the same pyramid written with
   [`a5_write_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid.md).
+
 - [`a5_pyramid_info()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_info.md)
   reads a file’s index from its footer, with a `tiles` table of every
   tile’s level, rows, bytes and box, and
   [`a5_read_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_read_pyramid.md)
   reads levels within a bounding box, as a renderer does.
+
 - [`a5pyramid_threads()`](https://belian-earth.github.io/a5pyramid/reference/a5pyramid_threads.md)
   sets the session’s thread count, by default every available CPU.
   Results do not depend on it, and builds can be interrupted.
+
 - The file format (`src/rust/a5pyramid/FORMAT.md`) differs from
   a5view’s:
+
   - tiles are runs of consecutive cell ids split along the A5 hierarchy
     to at most `tile_size` rows, so sparse data no longer makes many
     tiny row groups, and each tile is one row group;
@@ -97,8 +125,10 @@
   - columns are `cell` (`uint64`), `lod`, `ncell` and the value columns
     under their own names; `cell` is delta encoded, which takes it from
     8 bytes per row to about 3.
+
 - On 439,276 cells, writing a pyramid takes 0.48 s on 20 threads against
   4.06 s with a5view 0.3, and the file is 28% smaller.
+
 - The engine is the `a5pyramid` Rust crate in `src/rust/a5pyramid`, with
   no R dependency, to be published once the format settles. The R
   bindings are a separate crate in the same workspace. Its

@@ -38,7 +38,8 @@ A list of class `a5pyramid_info`:
 - `columns`: a tibble of the value columns' `name`, `type`, `reducer`
   and `sd`, the standard deviation that scaled a `"rep_child"` column (1
   where the leaves' standard deviation is 0 or undefined; `NA` for other
-  reducers and older files).
+  reducers and older files), and `dim`, the elements per cell of a
+  vector column (`NA` for scalar columns).
 
 - `levels`: a tibble of each level's `lod`, `rows` and number of
   `tiles`.
@@ -80,7 +81,7 @@ a5_write_pyramid(data.frame(cell = cells, value = runif(length(cells))), path)
 
 info <- a5_pyramid_info(path)
 info
-#> ── a5pyramid file file28a41476510a.parquet ─────────────────────────────────────
+#> ── a5pyramid file file29306d291993.parquet ─────────────────────────────────────
 #> Size: 17.1 KB (footer 4.6 KB)
 #> A5 index: 1.0
 #> Leaves: resolution 15, 1,024 cells

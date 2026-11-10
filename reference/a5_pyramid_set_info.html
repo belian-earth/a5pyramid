@@ -65,7 +65,8 @@ the footers of the shards its view meets.</p>
 <li><p><code>columns</code>: a tibble of the value columns' <code>name</code>, <code>type</code>,
 <code>reducer</code> and <code>sd</code>, the standard deviation that scaled a
 <code>"rep_child"</code> column (1 where the leaves' standard deviation is 0 or
-undefined; <code>NA</code> for other reducers and older files).</p></li>
+undefined; <code>NA</code> for other reducers and older files), and <code>dim</code>, the
+elements per cell of a vector column (<code>NA</code> for scalar columns).</p></li>
 <li><p><code>tiers</code>: a tibble with one row per tier: <code>tier</code> (from 0), <code>lod_min</code>,
 <code>lod_max</code>, <code>shard_resolution</code>, <code>tile_size</code>, and its <code>shards</code>, <code>rows</code>
 and <code>bytes</code>.</p></li>

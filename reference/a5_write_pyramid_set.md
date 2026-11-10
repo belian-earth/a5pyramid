@@ -189,7 +189,7 @@ tiers <- data.frame(
 a5_write_pyramid_set(x, dest, tiers = tiers)
 info <- a5_pyramid_set_info(dest)
 info
-#> ── a5pyramid set file28a41566c636 ──────────────────────────────────────────────
+#> ── a5pyramid set file29306529c8fa ──────────────────────────────────────────────
 #> Size: 24.7 KB in 6 shards
 #> A5 index: 1.0
 #> Leaves: resolution 15
