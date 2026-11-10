@@ -23,7 +23,8 @@ LOD, ascending, the leaves last.
 \item \code{columns}: a tibble of the value columns' \code{name}, \code{type},
 \code{reducer} and \code{sd}, the standard deviation that scaled a
 \code{"rep_child"} column (1 where the leaves' standard deviation is 0 or
-undefined; \code{NA} for other reducers and older files).
+undefined; \code{NA} for other reducers and older files), and \code{dim}, the
+elements per cell of a vector column (\code{NA} for scalar columns).
 \item \code{levels}: a tibble of each level's \code{lod}, \code{rows} and number of
 \code{tiles}.
 \item \code{tiles}: a tibble with one row per tile, which is one row group of

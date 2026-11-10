@@ -34,6 +34,25 @@
 #' `NA`. The `weights` column, when selected, is summed unless `reducers`
 #' says otherwise. Results do not depend on the number of threads.
 #'
+#' @section Vector columns:
+#' A *vector column* holds a fixed number of 8-bit values per cell, such as
+#' an embedding: an integer matrix column of a data frame (one row per
+#' cell), or a fixed-size list of `int8` or `uint8` (or fixed-size binary,
+#' read as `uint8` unless `types` says `"int8"`, as arrow reads a version-3
+#' file's vectors) in Arrow data, as DuckDB writes `TINYINT[64]`. Its type
+#' is `"int8"` (default for a matrix) or `"uint8"`, and it is always reduced
+#' by `"rep_child"`: every element takes part in the distance to the cell's
+#' mean, scaled by one standard deviation over all the elements (fixed by
+#' `rep_sd` like any other column), so a coarse cell holds the whole vector
+#' of one leaf. A file stores it as one fixed-length binary column, so a
+#' 64-element vector costs one column's metadata a tile rather than 64, and
+#' one byte an element. Files with a vector column are format version 3.
+#' `a5_pyramid()` and [a5_read_pyramid()] return it as an integer matrix
+#' column. Vector columns come after the scalar columns, whatever the order
+#' they are selected in. When a vector is the only `"rep_child"` input, its
+#' standard deviation scales every term alike and cannot change the
+#' representative.
+#'
 #' @section Column types:
 #' Every level is stored with one schema, so each value column has one
 #' storage type, set by `types`: `"int8"`, `"int16"`, `"int32"`, `"uint8"`,
@@ -351,8 +370,10 @@ pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
   if (!is.null(weights)) {
     weights_v <- check_weights(df, cell_name, weights, call)
   }
-  reducers_v <- resolve_reducers(names, aggregate, reducers, weights, call)
-  types_v <- resolve_types(df, names, types, call, arrow_types = arrow_src$types)
+  dims <- vector_dims(df, names)
+  reducers_v <- resolve_reducers(names, aggregate, reducers, weights, call, dims = dims)
+  types_v <- resolve_types(df, names, types, call, arrow_types = arrow_src$types, dims = dims,
+                           arrow_vectors = arrow_src$vectors)
   sd_v <- resolve_sd(rep_sd, names, reducers_v, call)
 
   # the leaves, converted for the engine: from R vectors, or read from the
@@ -360,12 +381,13 @@ pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
   leaves <- if (is.null(arrow_src)) {
     rs_call(a5pyramid_leaves_rs(
       cells = cells,
-      values = unname(lapply(names, function(nm) df[[nm]])),
+      values = unname(lapply(names, function(nm) vector_storage(df[[nm]]))),
       names = names,
       types = unname(types_v),
       reducers = unname(reducers_v),
       weights = weights_v,
-      sd = sd_v
+      sd = sd_v,
+      dims = unname(dims)
     ), call = call)
   } else {
     slot <- a5pyramid_stream_slot_rs()
@@ -377,7 +399,8 @@ pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
       types = unname(types_v),
       reducers = unname(reducers_v),
       weights = if (is.null(weights)) "" else weights,
-      sd = sd_v
+      sd = sd_v,
+      dims = unname(dims)
     ), call = call)
   }
   info <- a5pyramid_leaves_info_rs(leaves)
@@ -393,6 +416,44 @@ pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
     lods = lods,
     resolution = resolution
   )
+}
+
+#' A vector column's Arrow type: `list(type, dim, binary)` for a fixed-size
+#' list of int8 or uint8 (`type` its element type, whatever the child's
+#' nullability) or fixed-size binary (`type` "uint8" unless `types` says
+#' "int8"), else `NULL`
+#' @noRd
+arrow_vector_type <- function(type) {
+  if (inherits(type, "FixedSizeListType")) {
+    elem <- type$value_type$ToString()
+    if (!elem %in% c("int8", "uint8")) return(NULL)
+    return(list(type = elem, dim = as.integer(type$list_size), binary = FALSE))
+  }
+  if (inherits(type, "FixedSizeBinary")) {
+    return(list(type = "uint8", dim = as.integer(type$byte_width()), binary = TRUE))
+  }
+  NULL
+}
+
+#' Elements per cell of each value column: the columns of a matrix column
+#' (a vector column), 0 for a scalar column
+#' @noRd
+vector_dims <- function(df, names) {
+  vapply(names, function(nm) {
+    col <- df[[nm]]
+    if (is.matrix(col)) ncol(col) else 0L
+  }, integer(1))
+}
+
+#' A vector column's matrix as integers for the engine (whole doubles
+#' convert; the engine checks the range of the type)
+#' @noRd
+vector_storage <- function(col) {
+  if (is.matrix(col) && is.double(col)) {
+    whole <- is.na(col) | col == trunc(col)
+    if (all(whole)) storage.mode(col) <- "integer"
+  }
+  col
 }
 
 is_arrow_data <- function(x) {
@@ -424,6 +485,8 @@ arrow_source <- function(x, call) {
   }
   types <- vapply(schema$fields, function(f) f$type$ToString(), character(1))
   names(types) <- schema$names
+  vectors <- lapply(schema$fields, function(f) arrow_vector_type(f$type))
+  names(vectors) <- schema$names
   cell <- names(types)[types == "uint64"]
   if (length(cell) != 1L) {
     a5pyramid_abort("input", c(
@@ -431,12 +494,19 @@ arrow_source <- function(x, call) {
       "x" = if (length(cell) == 0L) "It has none." else "It has {length(cell)}: {.field {cell}}."
     ), call = call)
   }
-  proto <- lapply(types, function(t) if (t %in% names(ARROW_VALUE_TYPES)) double() else character())
+  proto <- lapply(names(types), function(nm) {
+    v <- vectors[[nm]]
+    if (!is.null(v)) matrix(integer(), 0L, v$dim)
+    else if (types[[nm]] %in% names(ARROW_VALUE_TYPES)) double()
+    else character()
+  })
+  names(proto) <- names(types)
   proto[[cell]] <- a5R::a5_cell()
   list(
     reader = reader,
     cell = cell,
     types = types,
+    vectors = vectors,
     proto = tibble::new_tibble(proto, nrow = 0L)
   )
 }
@@ -560,23 +630,55 @@ check_named_choice <- function(x, arg, names, choices, call) {
   x
 }
 
-resolve_reducers <- function(names, aggregate, reducers, weights, call) {
+resolve_reducers <- function(names, aggregate, reducers, weights, call, dims = integer()) {
   given <- check_named_choice(reducers, "reducers", names, PYRAMID_REDUCERS, call)
   out <- rep(aggregate, length(names))
   names(out) <- names
   if (!is.null(weights) && weights %in% names) out[[weights]] <- "sum"
+  # vector columns are reduced by rep_child, whatever the aggregate
+  vec <- names[dims[names] > 0L]
+  bad <- vec[vec %in% names(given) & given[vec] != "rep_child"]
+  if (length(bad) > 0L) {
+    a5pyramid_abort("input", c(
+      "Vector column{?s} {.field {bad}} can only be reduced by {.val rep_child}.",
+      "i" = "A coarse cell takes the vector of one representative leaf."
+    ), call = call)
+  }
+  out[vec] <- "rep_child"
   out[names(given)] <- given
   out
 }
 
-resolve_types <- function(df, names, types, call, arrow_types = NULL) {
+resolve_types <- function(df, names, types, call, arrow_types = NULL, dims = integer(),
+                          arrow_vectors = NULL) {
   given <- check_named_choice(types, "types", names, PYRAMID_TYPES, call)
-  out <- if (is.null(arrow_types)) {
-    vapply(names, function(nm) if (is.integer(df[[nm]])) "int32" else "float64", character(1))
-  } else {
-    vapply(names, function(nm) ARROW_VALUE_TYPES[[arrow_types[[nm]]]], character(1))
-  }
+  out <- vapply(names, function(nm) {
+    if (!is.null(arrow_types)) {
+      v <- arrow_vectors[[nm]]
+      if (!is.null(v)) v$type else ARROW_VALUE_TYPES[[arrow_types[[nm]]]]
+    } else if (isTRUE(dims[nm] > 0L)) {
+      "int8"
+    } else if (is.integer(df[[nm]])) {
+      "int32"
+    } else {
+      "float64"
+    }
+  }, character(1))
   names(out) <- names
+  vec <- names[dims[names] > 0L]
+  bad <- vec[vec %in% names(given) & !given[vec] %in% c("int8", "uint8")]
+  if (length(bad) > 0L) {
+    a5pyramid_abort("input", "Vector column{?s} {.field {bad}} must be {.val int8} or {.val uint8}.", call = call)
+  }
+  if (!is.null(arrow_types)) {
+    # a fixed-size list's element type is real; fixed-size binary is bytes,
+    # read as uint8 unless `types` says int8
+    listed <- vec[!vapply(vec, function(nm) isTRUE(arrow_vectors[[nm]]$binary), logical(1))]
+    fixed <- listed[listed %in% names(given) & given[listed] != out[listed]]
+    if (length(fixed) > 0L) {
+      a5pyramid_abort("input", "The element type of Arrow vector column{?s} {.field {fixed}} comes from the data; leave {?it/them} out of {.arg types}.", call = call)
+    }
+  }
   out[names(given)] <- given
   out
 }

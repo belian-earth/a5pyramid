@@ -49,7 +49,7 @@ mod write;
 pub use bbox::Bbox;
 pub use build::{build, default_lods, Leaves, Level, Pyramid};
 pub use cancel::Cancel;
-pub use column::{Column, ColumnSpec, ColumnType, Reducer};
+pub use column::{Column, ColumnSpec, ColumnType, Reducer, VectorColumn, VectorSpec};
 pub use error::{Error, Result};
 pub use meta::{ColumnMeta, LevelMeta, PyramidMeta, ShardMeta, A5_INDEX, A5_INDEX_KEY, FORMAT_VERSION, META_KEY};
 pub use read::PyramidFile;

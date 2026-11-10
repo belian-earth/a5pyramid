@@ -26,7 +26,7 @@ use crate::bbox::Bbox;
 use crate::build::{Level, Pyramid};
 use crate::cancel::Cancel;
 use crate::error::{invalid, Error, Result};
-use crate::meta::{column_meta, ColumnMeta, ShardMeta, A5_INDEX, FORMAT_VERSION, SHARD_FILE_VERSION};
+use crate::meta::{column_meta, version_with, ColumnMeta, ShardMeta, A5_INDEX, FORMAT_VERSION, SHARD_FILE_VERSION};
 use crate::read::PyramidFile;
 use crate::tiled::{TileOptions, TiledPyramid};
 use crate::write::{write_parquet, ParquetOptions};
@@ -282,9 +282,11 @@ fn write_shards(
     let Pyramid {
         data_resolution,
         columns,
+        vectors,
         levels,
     } = pyramid;
     let mut levels: Vec<Option<Level>> = levels.into_iter().map(Some).collect();
+    let dims: Vec<usize> = vectors.iter().map(|v| v.dim).collect();
     let mut shards = Vec::new();
     for (t, tier) in tiers.iter().enumerate() {
         cancel.check()?;
@@ -312,7 +314,7 @@ fn write_shards(
             let shard_levels: Vec<Level> = tier_levels
                 .iter()
                 .zip(&owners)
-                .map(|(level, o)| gather(level, o.rows_of(cell)))
+                .map(|(level, o)| gather(level, o.rows_of(cell), &dims))
                 .collect();
             let shard = ShardMeta {
                 tier: t,
@@ -330,6 +332,7 @@ fn write_shards(
             let shard_pyramid = Pyramid {
                 data_resolution,
                 columns: columns.clone(),
+                vectors: vectors.clone(),
                 levels: shard_levels,
             };
             let tiled = TiledPyramid::new(shard_pyramid, &tile_opts, cancel)?;
@@ -364,12 +367,12 @@ fn write_shards(
         .collect();
     let meta = SetMeta {
         format: SET_FORMAT.to_string(),
-        format_version: SHARD_FILE_VERSION,
+        format_version: version_with(&vectors, SHARD_FILE_VERSION),
         generator: opts.generator.clone(),
         a5_crate: crate::A5_CRATE_VERSION.to_string(),
         a5_index: A5_INDEX.to_string(),
         data_resolution,
-        columns: column_meta(&columns),
+        columns: column_meta(&columns, &vectors),
         tiers,
         bbox: Bbox::covering(&boxes).unwrap_or(Bbox::WORLD).to_array(),
         shards,
@@ -535,8 +538,9 @@ impl Owners {
     }
 }
 
-/// The rows `rows` of `level`, in order.
-fn gather(level: &Level, rows: &[u32]) -> Level {
+/// The rows `rows` of `level`, in order; `dims` are its vector columns'
+/// elements per cell.
+fn gather(level: &Level, rows: &[u32], dims: &[usize]) -> Level {
     let pick = |i: &u32| *i as usize;
     Level {
         lod: level.lod,
@@ -546,6 +550,19 @@ fn gather(level: &Level, rows: &[u32]) -> Level {
             .values
             .iter()
             .map(|v| rows.par_iter().map(|r| v[pick(r)]).collect())
+            .collect(),
+        vectors: level
+            .vectors
+            .iter()
+            .zip(dims)
+            .map(|(v, &dim)| {
+                let mut out = vec![0u8; rows.len() * dim];
+                out.par_chunks_mut(dim).zip(rows.par_iter()).for_each(|(o, &i)| {
+                    let i = i as usize;
+                    o.copy_from_slice(&v[i * dim..(i + 1) * dim]);
+                });
+                out
+            })
             .collect(),
     }
 }
@@ -561,6 +578,7 @@ mod tests {
     use super::*;
     use crate::testutil::grid;
     use crate::{build, default_lods, Column, ColumnType, Leaves, Reducer};
+    use arrow_array::cast::AsArray;
 
     fn leaves() -> Leaves {
         // leaves at 12 over an area that spans many shards at resolution 7
@@ -574,7 +592,7 @@ mod tests {
                 Column::new("r", ColumnType::UInt8, Reducer::RepChild, v),
                 Column::new("m", ColumnType::Float32, Reducer::Mean, w),
             ],
-            weights: None,
+            ..Default::default()
         }
     }
 
@@ -838,6 +856,41 @@ mod tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         let meta = write_set(p, &dir, &opts(tiers()), &Cancel::new()).unwrap();
         assert!(meta.shards.len() > 5);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn vectors_split_with_their_cells_in_version_3_sets() {
+        let mut l = leaves();
+        let n = l.cells.len();
+        let bytes: Vec<u8> = (0..n * 3).map(|i| ((i * 2654435761usize) >> 7) as u8).collect();
+        l.vectors = vec![crate::VectorColumn::new("e", ColumnType::UInt8, 3, bytes)];
+        let whole = build(l, &crate::default_lods(12), &Cancel::new()).unwrap();
+        let dir = tempdir("vectors");
+        let meta = write_set(whole.clone(), &dir, &opts(tiers()), &Cancel::new()).unwrap();
+        assert_eq!(meta.format_version, 3);
+        assert_eq!(meta.columns.last().unwrap().dim, Some(3));
+        // every row of every level, with its vector, is in exactly one shard
+        let mut got: Vec<(u64, Vec<u8>)> = Vec::new();
+        for s in &meta.shards {
+            let f = PyramidFile::open(dir.join(&s.path)).unwrap();
+            assert_eq!(f.meta.format_version, 3);
+            for b in f.read(&(0..f.n_row_groups()).collect::<Vec<_>>()).unwrap() {
+                let cells = b.column(0).as_primitive::<arrow_array::types::UInt64Type>();
+                let e = b.column_by_name("e").unwrap().as_fixed_size_binary();
+                for i in 0..b.num_rows() {
+                    got.push((cells.value(i), e.value(i).to_vec()));
+                }
+            }
+        }
+        let mut want: Vec<(u64, Vec<u8>)> = whole
+            .levels
+            .iter()
+            .flat_map(|l| (0..l.len()).map(move |i| (l.cells[i], l.vectors[0][i * 3..i * 3 + 3].to_vec())))
+            .collect();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

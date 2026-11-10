@@ -1,5 +1,17 @@
 # a5pyramid (development version)
 
+* Vector columns (format version 3): a fixed number of `int8` or `uint8`
+  values per cell, such as a 64-element embedding, from an integer matrix
+  column of a data frame or a fixed-size list (DuckDB's `TINYINT[64]`) in
+  Arrow data. The engine holds one byte an element; files store the vector
+  as one fixed-length binary column, so its footer and requests grow like
+  one column's, not 64. Vectors are reduced by `rep_child` with one standard
+  deviation over all their elements (fixed by `rep_sd`), together with any
+  scalar `rep_child` columns. `a5_pyramid()` and `a5_read_pyramid()` return
+  them as integer matrix columns; `columns$dim` in the info functions. Files
+  and sets without vector columns keep versions 1 and 2. In the crate:
+  `VectorColumn`, `VectorSpec`, `Leaves::vectors`, `Level::vectors`.
+
 * Pyramid sets: `a5_write_pyramid_set()` writes one pyramid as a directory
   of small files, *shards*, with an index, `set.json`, for data too large
   for one file to open in a browser, whose footer grows by about 365 bytes

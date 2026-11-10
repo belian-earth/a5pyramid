@@ -1,4 +1,4 @@
-# The a5pyramid file format, version 2
+# The a5pyramid file format, version 3
 
 An a5pyramid file is one Parquet file holding [A5](https://a5geo.org/) cells
 at one resolution (the *leaves*, with their values) and coarser *levels of
@@ -10,7 +10,8 @@ requests.
 A pyramid too large for one file is stored as a *pyramid set*: a directory
 of a5pyramid files, *shards*, each holding some LODs of the cells around one
 coarse cell, and an index, `set.json` (see "Pyramid sets"). Version 2 adds
-sets; a single file is unchanged from version 1.
+sets; a single file is unchanged from version 1. Version 3 adds vector
+columns (see "Vector columns"), such as embeddings.
 
 The same layout also exists in memory as Arrow record batches (see "The
 Arrow form"), for clients that take a pyramid without a file.
@@ -21,10 +22,13 @@ R package built on it) and readers (renderers). Key words follow RFC 2119.
 ## Versions
 
 A writer records in `format_version` the oldest version whose rules a file
-follows: 1 for a single file, 2 for a shard of a set. A reader that supports
-version 2 reads both; a version-1 reader refuses shards, as it must, because
-a shard breaks two version-1 rules: its finest level need not be the leaves,
-and its levels hold only the cells it owns.
+follows: 1 for a single file, 2 for a shard of a set, and 3 for either when
+it has a vector column (and for the `set.json` of a set whose shards have
+one). A reader that supports a version reads every older one. A version-1
+reader refuses shards, as it must, because a shard breaks two version-1
+rules: its finest level need not be the leaves, and its levels hold only the
+cells it owns. A version-2 reader refuses files with vector columns, whose
+type it does not know.
 
 ## Reading a file
 
@@ -50,7 +54,7 @@ A reader never needs to decode a tile to decide whether to fetch it.
 | `cell` | `INT64`, `INTEGER(64, false)` | `uint64` | A5 cell id. Never null. |
 | `lod` | `INT32`, `INTEGER(8, false)` | `uint8` | The cell's resolution, the row's level. Never null. |
 | `ncell` | `INT32`, `INTEGER(32, false)` | `uint32` | The number of leaves the row summarises; 1 at the leaves. Never null. |
-| value columns | see below | see below | One per column in the index's `columns`, in that order. Null where missing. |
+| value columns | see below | see below | One per column in the index's `columns`, in that order: the scalar columns, then the vector columns. Null where missing (vectors are never missing). |
 
 Value column types (`type` in the index) are `int8`, `int16`, `int32`,
 `uint8`, `uint16`, `uint32`, `float32` and `float64`, stored as the matching
@@ -59,6 +63,29 @@ for the integer types. hyparquet decodes `cell` as `BigInt` and every other
 column as `Number`.
 
 The names `cell`, `lod` and `ncell` are reserved: no value column takes them.
+
+### Vector columns
+
+A vector column (version 3) holds `dim` values of an 8-bit type per row,
+such as an embedding. Its index entry has `dim` and a `type` of `int8` or
+`uint8`. It is stored as Parquet `FIXED_LEN_BYTE_ARRAY` of length `dim`
+(Arrow `fixed_size_binary(dim)`), plain encoded, without statistics: one
+column chunk a tile, where `dim` scalar columns would take `dim` chunks and
+grow the footer by `dim` times as much. Byte `e` of a row is element `e`, as
+its two's complement for `int8`. hyparquet returns each row as a
+`Uint8Array` of `dim` bytes; read `int8` elements through an `Int8Array`
+view of the same bytes. A vector is never null.
+
+A vector column is always reduced by `rep_child` (see "Levels"), with every
+element taking part in the distance to the cell's mean and one `sd` for all
+its elements. A writer computes that `sd` over every element of every leaf,
+pooled: the sample standard deviation (n − 1) about the elements' grand
+mean, or 1 where it is 0 or undefined. When the vector is a pyramid's only
+`rep_child` input, its `sd` scales every term of the distance alike and
+cannot change a cell's representative, so builds of separate parts of a
+region need not fix it (cells at the seams still differ, as their leaves
+do); with scalar `rep_child` columns beside it, fix the `sd`s as for any
+`rep_child` column.
 
 ## Tiles
 
@@ -131,7 +158,7 @@ The index of a small file (1,024 leaves at resolution 15, levels at 11 and
 | `data_resolution` | The leaves' resolution. In a single file it is the finest level's `lod`; a shard of a tier coarser than the leaves holds no level at it. |
 | `tile_size` | The most rows in a tile. |
 | `bbox` | `[west, south, east, north]` (see "Boxes"): in a single file, of the leaves; in a shard, of every tile, since coarse cells reach past the leaves under them. |
-| `columns` | The value columns in column order: `name`, storage `type` and `reducer` (see "Levels"), and for a `rep_child` column `sd`, the standard deviation that scaled it (1 where the leaves' standard deviation is 0 or undefined, as for a constant column, so `sd` is the scale used rather than a statistic of the data). `sd` is optional (absent before 2026-11-09), and readers that do not choose representatives ignore it. |
+| `columns` | The value columns in column order: `name`, storage `type` and `reducer` (see "Levels"), and for a `rep_child` column `sd`, the standard deviation that scaled it (1 where the leaves' standard deviation is 0 or undefined, as for a constant column, so `sd` is the scale used rather than a statistic of the data). `sd` is optional (absent before 2026-11-09), and readers that do not choose representatives ignore it. A vector column (version 3) also has `dim`, its elements per row. |
 | `levels` | One entry per level, ascending `lod`: its `lod`, its number of `rows`, and the half-open range `[start, end)` of its tiles. Consecutive levels' ranges meet, and together cover every tile. |
 | `tile_bbox` | The box of every tile in order, flat: tile `i` is at indices `4i` to `4i + 3`. |
 | `shard` | Shards only (version 2): `{"tier", "cell", "resolution"}`, the shard's tier, its shard cell as 16 hex digits, and that cell's resolution. Absent in a single file. |
@@ -171,7 +198,7 @@ Each value column is reduced over the leaves under each cell by its
 | `mean` | The mean, weighted by the leaves' weights when the writer had them. |
 | `sum`, `min`, `max` | The sum, minimum or maximum. |
 | `mode` | The most frequent value (by total weight), ties to the smallest. |
-| `rep_child` | The value of one *representative* leaf, the same leaf for every `rep_child` column: the leaf closest to the cell's mean over all `rep_child` columns, each divided by its standard deviation (the column's `sd`: over the leaves, or fixed by the writer). Ties go to the lowest cell id. |
+| `rep_child` | The value of one *representative* leaf, the same leaf for every `rep_child` column: the leaf closest to the cell's mean over all `rep_child` columns, each divided by its standard deviation (the column's `sd`: over the leaves, or fixed by the writer), and over every element of the vector columns, each divided by its column's one `sd`. Ties go to the lowest cell id. |
 
 With `sd` computed over the leaves, a cell's representative depends on every
 leaf of the build, so pyramids of different parts of a region can choose

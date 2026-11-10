@@ -12,6 +12,7 @@ use extendr_api::prelude::*;
 use a5pyramid::{
     build, default_tiers, write_parquet, write_set, Bbox, Column, ColumnSpec, ColumnType, Compression, Leaves,
     ParquetOptions, Pyramid, PyramidFile, Reducer, SetMeta, SetOptions, ShardEntry, Tier, TileOptions, TiledPyramid,
+    VectorColumn,
 };
 use arrow_array::ffi_stream::{FFI_ArrowArrayStream, RecordBatchStreamReader};
 
@@ -50,6 +51,7 @@ fn filter(v: Vec<f64>, keep: Option<&[bool]>) -> Vec<f64> {
 
 /// Leaves from R: cells (NA cells dropped with their rows), value columns
 /// and their names, types and reducers, and optional weights.
+#[allow(clippy::too_many_arguments)]
 fn leaves_from_r(
     cells: &Robj,
     values: &List,
@@ -58,6 +60,7 @@ fn leaves_from_r(
     reducers: &[String],
     weights: &Robj,
     sd: &[f64],
+    dims: &[i32],
 ) -> Result<Leaves> {
     let (ids, na) = cells_to_u64(cells)?;
     let n = ids.len();
@@ -66,12 +69,17 @@ fn leaves_from_r(
         None => ids,
         Some(k) => ids.into_iter().zip(k).filter(|(_, &k)| k).map(|(c, _)| c).collect(),
     };
-    if values.len() != names.len() {
-        return Err(other("internal error: value columns and names differ in length"));
+    if values.len() != names.len() || dims.len() != names.len() {
+        return Err(other("internal error: value columns, names and dims differ in length"));
     }
     let specs = column_specs(names, types, reducers, sd)?;
     let mut columns = Vec::with_capacity(values.len());
+    let mut vectors = Vec::new();
     for (k, (_, col)) in values.iter().enumerate() {
+        if dims[k] > 0 {
+            vectors.push(vector_from_r(&col, &specs[k], dims[k] as usize, n, keep.as_deref())?);
+            continue;
+        }
         let v = r_numeric(&col, &format!("column `{}`", names[k]))?;
         if v.len() != n {
             return Err(other(format!(
@@ -97,8 +105,59 @@ fn leaves_from_r(
     Ok(Leaves {
         cells: ids,
         columns,
+        vectors,
         weights,
     })
+}
+
+/// A vector column from an R integer matrix (one row per cell), as bytes
+/// row by row, at the rows `keep` (all when `None`).
+fn vector_from_r(m: &Robj, spec: &ColumnSpec, dim: usize, n: usize, keep: Option<&[bool]>) -> Result<VectorColumn> {
+    let name = &spec.name;
+    let v = m.as_integer_slice().ok_or_else(|| {
+        other(format!(
+            "invalid input: vector column `{name}` must be an integer matrix"
+        ))
+    })?;
+    if v.len() != n * dim {
+        return Err(other(format!(
+            "invalid input: vector column `{name}` has {} values for {n} cells of {dim} elements",
+            v.len()
+        )));
+    }
+    let (lo, hi) = match spec.ty {
+        ColumnType::Int8 => (-128, 127),
+        ColumnType::UInt8 => (0, 255),
+        t => {
+            return Err(other(format!(
+                "invalid input: vector column `{name}` must be int8 or uint8, not {}",
+                t.as_str()
+            )))
+        }
+    };
+    let rows: Vec<usize> = match keep {
+        None => (0..n).collect(),
+        Some(k) => (0..n).filter(|&i| k[i]).collect(),
+    };
+    let mut bytes = Vec::with_capacity(rows.len() * dim);
+    for &i in &rows {
+        for e in 0..dim {
+            // R matrices are column-major
+            let x = v[e * n + i];
+            if x == i32::MIN || x < lo || x > hi {
+                return Err(other(format!(
+                    "invalid input: vector column `{name}` holds {} at row {}, outside {} ({lo} to {hi})",
+                    if x == i32::MIN { "NA".to_string() } else { x.to_string() },
+                    i + 1,
+                    spec.ty.as_str()
+                )));
+            }
+            bytes.push(x as i8 as u8);
+        }
+    }
+    let mut out = VectorColumn::new(name.clone(), spec.ty, dim, bytes);
+    out.spec.sd = spec.sd;
+    Ok(out)
 }
 
 /// The value columns' specs, from R's names, types, reducers and standard
@@ -151,9 +210,10 @@ fn a5pyramid_leaves_rs(
     reducers: Vec<String>,
     weights: Robj,
     sd: Vec<f64>,
+    dims: Vec<i32>,
 ) -> Result<Robj> {
     Ok(leaves_handle(leaves_from_r(
-        &cells, &values, &names, &types, &reducers, &weights, &sd,
+        &cells, &values, &names, &types, &reducers, &weights, &sd, &dims,
     )?))
 }
 
@@ -205,8 +265,12 @@ fn a5pyramid_leaves_arrow_rs(
     reducers: Vec<String>,
     weights: String,
     sd: Vec<f64>,
+    dims: Vec<i32>,
 ) -> Result<Robj> {
     let specs = column_specs(&names, &types, &reducers, &sd)?;
+    if dims.len() != names.len() {
+        return Err(other("internal error: names and dims differ in length"));
+    }
     let mut slot: ExternalPtr<StreamSlot> = (&holder).try_into()?;
     let stream = std::mem::replace(slot.0.as_mut(), FFI_ArrowArrayStream::empty());
     let reader = RecordBatchStreamReader::try_new(stream).map_err(|e| other(format!("arrow error: {e}")))?;
@@ -227,7 +291,9 @@ fn a5pyramid_leaves_arrow_rs(
     let weight_k = (!weights.is_empty()).then(|| index(&weights)).transpose()?;
 
     let mut cells: Vec<u64> = Vec::new();
+    // scalar columns as f64, vector columns as bytes (one or the other per name)
     let mut values: Vec<Vec<f64>> = vec![Vec::new(); names.len()];
+    let mut bytes: Vec<Vec<u8>> = vec![Vec::new(); names.len()];
     let mut w: Vec<f64> = Vec::new();
     for batch in reader {
         if interrupt_pending() {
@@ -242,7 +308,17 @@ fn a5pyramid_leaves_arrow_rs(
             Some(rows) => cells.extend(rows.iter().map(|&i| c.value(i))),
         }
         for (k, &col) in value_k.iter().enumerate() {
-            append_f64(&mut values[k], batch.column(col).as_ref(), keep.as_deref(), &names[k])?;
+            if dims[k] > 0 {
+                append_bytes(
+                    &mut bytes[k],
+                    batch.column(col).as_ref(),
+                    dims[k] as usize,
+                    keep.as_deref(),
+                    &names[k],
+                )?;
+            } else {
+                append_f64(&mut values[k], batch.column(col).as_ref(), keep.as_deref(), &names[k])?;
+            }
         }
         if let Some(col) = weight_k {
             append_f64(&mut w, batch.column(col).as_ref(), keep.as_deref(), &weights)?;
@@ -250,17 +326,81 @@ fn a5pyramid_leaves_arrow_rs(
     }
     cells.shrink_to_fit();
     values.iter_mut().for_each(|v| v.shrink_to_fit());
+    bytes.iter_mut().for_each(|v| v.shrink_to_fit());
     w.shrink_to_fit();
-    let columns = specs
-        .into_iter()
-        .zip(values)
-        .map(|(spec, values)| Column { spec, values })
-        .collect();
+    let mut columns = Vec::new();
+    let mut vectors = Vec::new();
+    for (((spec, v), b), &dim) in specs.into_iter().zip(values).zip(bytes).zip(&dims) {
+        if dim > 0 {
+            let mut vc = VectorColumn::new(spec.name, spec.ty, dim as usize, b);
+            vc.spec.sd = spec.sd;
+            vectors.push(vc);
+        } else {
+            columns.push(Column { spec, values: v });
+        }
+    }
     Ok(leaves_handle(Leaves {
         cells,
         columns,
+        vectors,
         weights: weight_k.map(|_| w),
     }))
+}
+
+/// Append a vector column's Arrow array (fixed-size list of int8 or uint8,
+/// or fixed-size binary, `dim` elements a row) to `out` as bytes, at the
+/// rows `keep` (all when `None`). Vectors are never missing.
+fn append_bytes(out: &mut Vec<u8>, a: &dyn Array, dim: usize, keep: Option<&[usize]>, name: &str) -> Result<()> {
+    let bad = |what: &str| other(format!("invalid input: vector column `{name}` {what}"));
+    // only the rows kept (with a cell) must hold a whole vector
+    let rows = |len: usize| -> Vec<usize> { keep.map_or_else(|| (0..len).collect(), |k| k.to_vec()) };
+    if a.null_count() > 0 && rows(a.len()).iter().any(|&i| a.is_null(i)) {
+        return Err(bad("has a missing vector"));
+    }
+    match a.data_type() {
+        DataType::FixedSizeList(field, size) if *size as usize == dim => {
+            let l = a.as_fixed_size_list();
+            let child = l.values();
+            if child.null_count() > 0
+                && rows(l.len()).iter().any(|&i| {
+                    let start = l.value_offset_at(i);
+                    (start..start + dim).any(|j| child.is_null(j))
+                })
+            {
+                return Err(bad("has a missing element"));
+            }
+            match field.data_type() {
+                DataType::Int8 => {
+                    let v = child.as_primitive::<Int8Type>().values();
+                    for i in rows(l.len()) {
+                        let start = l.value_offset_at(i);
+                        // two's complement bytes, as stored
+                        out.extend(v[start..start + dim].iter().map(|&x| x as u8));
+                    }
+                }
+                DataType::UInt8 => {
+                    let v = child.as_primitive::<UInt8Type>().values();
+                    for i in rows(l.len()) {
+                        let start = l.value_offset_at(i);
+                        out.extend_from_slice(&v[start..start + dim]);
+                    }
+                }
+                t => return Err(bad(&format!("must hold int8 or uint8 elements, not {t}"))),
+            }
+        }
+        DataType::FixedSizeBinary(size) if *size as usize == dim => {
+            let b = a.as_fixed_size_binary();
+            for i in rows(b.len()) {
+                out.extend_from_slice(b.value(i));
+            }
+        }
+        t => {
+            return Err(bad(&format!(
+                "must be a fixed-size list or binary of {dim} elements, not {t}"
+            )))
+        }
+    }
+    Ok(())
 }
 
 /// Append a numeric Arrow array to `out` as f64, null as NaN, at the rows
@@ -319,6 +459,7 @@ fn pyramid_to_r(p: Pyramid) -> Robj {
     let mut lod = Vec::with_capacity(n);
     let mut ncell = Vec::with_capacity(n);
     let mut values: Vec<Vec<f64>> = p.columns.iter().map(|_| Vec::with_capacity(n)).collect();
+    let mut vectors: Vec<Vec<u8>> = p.vectors.iter().map(|v| Vec::with_capacity(n * v.dim)).collect();
     for level in p.levels {
         lod.extend(std::iter::repeat_n(level.lod, level.len()));
         ncell.extend(level.ncell.iter().map(|&c| c as f64));
@@ -326,13 +467,19 @@ fn pyramid_to_r(p: Pyramid) -> Robj {
         for (out, v) in values.iter_mut().zip(level.values) {
             out.extend(v);
         }
+        for (out, v) in vectors.iter_mut().zip(level.vectors) {
+            out.extend(v);
+        }
     }
-    let cols: Vec<(String, Robj)> = p
+    let mut cols: Vec<(String, Robj)> = p
         .columns
         .iter()
         .zip(values)
         .map(|(c, v)| (c.name.clone(), values_to_r(c.ty, v)))
         .collect();
+    for (spec, bytes) in p.vectors.iter().zip(vectors) {
+        cols.push((spec.name.clone(), vector_matrix(&bytes, spec.dim, spec.ty)));
+    }
     list!(
         cell = cells_from_u64(&cells),
         lod = lod,
@@ -340,6 +487,31 @@ fn pyramid_to_r(p: Pyramid) -> Robj {
         values = List::from_pairs(cols)
     )
     .into()
+}
+
+/// Vector bytes (row by row) as an R integer matrix, one row per cell,
+/// filled in place: 4 bytes an element beside the bytes, not 8.
+fn vector_matrix(bytes: &[u8], dim: usize, ty: ColumnType) -> Robj {
+    let n = bytes.len() / dim.max(1);
+    let mut out = Integers::new(n * dim);
+    {
+        let slots: &mut [Rint] = &mut out;
+        for i in 0..n {
+            for e in 0..dim {
+                let b = bytes[i * dim + e];
+                // R matrices are column-major
+                slots[e * n + i] = Rint::from(if ty == ColumnType::Int8 {
+                    b as i8 as i32
+                } else {
+                    b as i32
+                });
+            }
+        }
+    }
+    let mut r: Robj = out.into();
+    // a fresh vector of the right length takes a dim attribute
+    let _ = r.set_attrib(dim_symbol(), Robj::from(vec![n as i32, dim as i32]));
+    r
 }
 
 /// Leaf counts as integer, or double past the integer range.
@@ -466,6 +638,15 @@ fn set_to_r(m: &SetMeta) -> Result<Robj> {
                         .iter()
                         .map(|c| c.sd.map_or(Rfloat::na(), Rfloat::from))
                         .collect::<Vec<Rfloat>>()
+                )
+            ),
+            (
+                "dim",
+                Robj::from(
+                    m.columns
+                        .iter()
+                        .map(|c| c.dim.map_or(Rint::na(), |d| Rint::from(d as i32)))
+                        .collect::<Vec<Rint>>()
                 )
             ),
         ]),
@@ -621,6 +802,15 @@ fn a5pyramid_info_rs(src: String) -> Result<Robj> {
                         .collect::<Vec<Rfloat>>()
                 )
             ),
+            (
+                "dim",
+                Robj::from(
+                    m.columns
+                        .iter()
+                        .map(|c| c.dim.map_or(Rint::na(), |d| Rint::from(d as i32)))
+                        .collect::<Vec<Rint>>()
+                )
+            ),
         ]),
         levels = list!(
             lod = m.levels.iter().map(|l| l.lod).collect::<Vec<_>>(),
@@ -679,8 +869,22 @@ fn a5pyramid_read_rs(src: String, lods: Robj, bbox: Vec<f64>) -> Result<Robj> {
         .flat_map(|b| b.column(0).as_primitive::<UInt64Type>().values().iter().copied())
         .collect();
     let mut cols = Vec::with_capacity(names.len());
-    for (k, name) in names.iter().enumerate() {
-        cols.push((name.clone(), column_to_r(&batches, 3 + k)?));
+    for (k, (name, c)) in names.iter().zip(&f.meta.columns).enumerate() {
+        let col = match c.dim {
+            None => column_to_r(&batches, 3 + k)?,
+            Some(dim) => {
+                let ty = ColumnType::parse(&c.ty).map_err(r_error)?;
+                let mut bytes = Vec::new();
+                for b in &batches {
+                    let a = b.column(3 + k).as_fixed_size_binary();
+                    for i in 0..a.len() {
+                        bytes.extend_from_slice(a.value(i));
+                    }
+                }
+                vector_matrix(&bytes, dim, ty)
+            }
+        };
+        cols.push((name.clone(), col));
     }
     Ok(list!(
         cell = cells_from_u64(&cells),
