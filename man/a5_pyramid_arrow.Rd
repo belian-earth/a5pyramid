@@ -13,6 +13,7 @@ a5_pyramid_arrow(
   weights = NULL,
   types = NULL,
   rep_sd = NULL,
+  codecs = NULL,
   tile_size = 4096L,
   metadata = NULL,
   threads = NULL
@@ -62,6 +63,10 @@ representatives differently even where their cells are the same; fix
 the standard deviations (from a whole-region build's
 \code{a5_pyramid_info()$columns$sd}, say) for builds whose cells must
 agree.}
+
+\item{codecs}{Named character vector of codecs for \code{"mean"} columns
+whose values are codes, such as \code{c(embedding = "aef")}. See "Codecs".
+Default \code{NULL}: every column stores its values.}
 
 \item{tile_size}{The most rows in a tile (row group). Larger tiles mean
 fewer requests and a smaller footer; smaller tiles mean less data

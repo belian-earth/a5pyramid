@@ -120,7 +120,8 @@ impl ColumnType {
 /// missing value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reducer {
-    /// The mean, weighted by the leaf weights when given.
+    /// The mean, weighted by the leaf weights when given; of the decoded
+    /// values for a column with a [`Codec`], encoded again.
     Mean,
     /// The sum (weights are not applied).
     Sum,
@@ -160,12 +161,89 @@ impl Reducer {
     }
 }
 
+/// How a column's stored codes map to the values they stand for. A `Mean`
+/// over a column with a codec decodes each leaf's code, takes the
+/// (weighted) mean of the values and encodes it, so that a coarse cell
+/// holds the code of the mean of its leaves' values. A nonlinear codec does
+/// not commute with the mean: the mean of the codes is not the code of the
+/// mean.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Codec {
+    /// AlphaEarth Foundations (AEF) embeddings: `int8` codes, decoded as
+    /// `sign(x) * (x / 127.5)^2` and encoded as
+    /// `round(sign(v) * sqrt(|v|) * 127.5)`, rounded half away from zero and
+    /// clamped to -128 to 127, the encoding of the a5embeddings store.
+    Aef,
+}
+
+impl Codec {
+    pub const ALL: [Codec; 1] = [Self::Aef];
+
+    pub fn parse(s: &str) -> Result<Self> {
+        Self::ALL.into_iter().find(|c| c.as_str() == s).ok_or_else(|| {
+            let names: Vec<&str> = Self::ALL.iter().map(|c| c.as_str()).collect();
+            invalid(format!("unknown codec {s:?}; expected one of {}", names.join(", ")))
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Aef => "aef",
+        }
+    }
+
+    /// The storage type of the codes.
+    pub fn code_type(self) -> ColumnType {
+        match self {
+            Self::Aef => ColumnType::Int8,
+        }
+    }
+
+    /// The value a code stands for. Missing codes (NaN) stay missing.
+    #[inline]
+    pub fn decode(self, code: f64) -> f64 {
+        match self {
+            Self::Aef => {
+                let t = code / 127.5;
+                t * t.abs()
+            }
+        }
+    }
+
+    /// The code of a value. Missing values (NaN) stay missing.
+    #[inline]
+    pub fn encode(self, value: f64) -> f64 {
+        if value.is_nan() {
+            return value;
+        }
+        match self {
+            // f64::round rounds half away from zero, as DuckDB's ROUND in
+            // the store's encoder
+            Self::Aef => (value.signum() * value.abs().sqrt() * 127.5)
+                .round()
+                .clamp(-128.0, 127.0),
+        }
+    }
+
+    /// The value of every byte, for a vector column of `ty` elements.
+    pub(crate) fn byte_values(self, ty: ColumnType) -> [f64; 256] {
+        let mut lut = [0.0; 256];
+        for (b, v) in lut.iter_mut().enumerate() {
+            *v = self.decode(ty.byte_value(b as u8));
+        }
+        lut
+    }
+}
+
 /// Name, storage type and reducer of a value column.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColumnSpec {
     pub name: String,
     pub ty: ColumnType,
     pub reducer: Reducer,
+    /// How the stored codes map to values ([`Codec`]), for a `Mean` column
+    /// of the codec's code type; `None` stores the values themselves.
+    pub codec: Option<Codec>,
     /// For a `RepChild` column, the standard deviation that scales it in the
     /// distance to a cell's mean. In the leaves, `None` computes it over
     /// the leaves (1 where that is 0 or undefined, as for a constant
@@ -190,6 +268,7 @@ impl Column {
                 name: name.into(),
                 ty,
                 reducer,
+                codec: None,
                 sd: None,
             },
             values,
@@ -201,12 +280,19 @@ impl Column {
         self.spec.sd = Some(sd);
         self
     }
+
+    /// The column with its codes decoded by `codec` ([`ColumnSpec::codec`]).
+    pub fn with_codec(mut self, codec: Codec) -> Self {
+        self.spec.codec = Some(codec);
+        self
+    }
 }
 
-/// Name, element type, length and `RepChild` scale of a vector column: a
-/// fixed number of 8-bit values per cell, such as an embedding. A vector
-/// column is reduced by `RepChild` only, together with every other
-/// `RepChild` column, and stored as one fixed-length binary value per row.
+/// Name, element type, length, reducer and `RepChild` scale of a vector
+/// column: a fixed number of 8-bit values per cell, such as an embedding,
+/// stored as one fixed-length binary value per row. A vector column is
+/// reduced by `RepChild`, together with every other `RepChild` column, or
+/// by `Mean`, element by element.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VectorSpec {
     pub name: String,
@@ -214,10 +300,16 @@ pub struct VectorSpec {
     pub ty: ColumnType,
     /// Elements per cell.
     pub dim: usize,
-    /// One standard deviation for every element, scaling the vector in the
-    /// distance to a cell's mean, as [`ColumnSpec::sd`]: `None` computes it
-    /// over all the leaves' elements (1 where that is 0 or undefined), a
-    /// value fixes it. In a built pyramid, the value used.
+    /// `RepChild` (the default) or `Mean`.
+    pub reducer: Reducer,
+    /// How each element's code maps to its value, for a `Mean` vector of
+    /// the codec's code type, as [`ColumnSpec::codec`].
+    pub codec: Option<Codec>,
+    /// For a `RepChild` vector, one standard deviation for every element,
+    /// scaling the vector in the distance to a cell's mean, as
+    /// [`ColumnSpec::sd`]: `None` computes it over all the leaves' elements
+    /// (1 where that is 0 or undefined), a value fixes it. In a built
+    /// pyramid, the value used. Always `None` for a `Mean` vector.
     pub sd: Option<f64>,
 }
 
@@ -237,6 +329,8 @@ impl VectorColumn {
                 name: name.into(),
                 ty,
                 dim,
+                reducer: Reducer::RepChild,
+                codec: None,
                 sd: None,
             },
             values,
@@ -246,6 +340,18 @@ impl VectorColumn {
     /// The column with its `RepChild` scale fixed at `sd`.
     pub fn with_sd(mut self, sd: f64) -> Self {
         self.spec.sd = Some(sd);
+        self
+    }
+
+    /// The column reduced by `reducer` (`RepChild` or `Mean`).
+    pub fn with_reducer(mut self, reducer: Reducer) -> Self {
+        self.spec.reducer = reducer;
+        self
+    }
+
+    /// The column with its elements decoded by `codec` in a `Mean`.
+    pub fn with_codec(mut self, codec: Codec) -> Self {
+        self.spec.codec = Some(codec);
         self
     }
 }
@@ -274,7 +380,41 @@ mod tests {
         for r in Reducer::ALL {
             assert_eq!(Reducer::parse(r.as_str()).unwrap(), r);
         }
+        for c in Codec::ALL {
+            assert_eq!(Codec::parse(c.as_str()).unwrap(), c);
+        }
         assert!(ColumnType::parse("int64").is_err());
         assert!(Reducer::parse("median").is_err());
+        assert!(Codec::parse("sqrt").is_err());
+    }
+
+    #[test]
+    fn aef_codes_round_trip_and_match_the_store_encoder() {
+        let aef = Codec::Aef;
+        for q in -128..=127 {
+            let q = q as f64;
+            assert_eq!(aef.encode(aef.decode(q)), q, "code {q}");
+        }
+        assert_eq!(aef.decode(127.0), (127.0f64 / 127.5).powi(2));
+        assert_eq!(aef.decode(-64.0), -(64.0f64 / 127.5).powi(2));
+        assert_eq!(aef.decode(0.0), 0.0);
+        // the store's SQL: ROUND(SIGN(v) * SQRT(ABS(v)) * 127.5), half away
+        // from zero, clamped to -128..127
+        let store = |v: f64| (v.signum() * v.abs().sqrt() * 127.5).round().clamp(-128.0, 127.0);
+        for k in -2000..=2000 {
+            let v = k as f64 / 1990.0;
+            assert_eq!(aef.encode(v), store(v), "value {v}");
+        }
+        // just past a half step, either side of zero
+        assert_eq!(aef.encode((10.5f64 / 127.5).powi(2) * (1.0 + 1e-12)), 11.0);
+        assert_eq!(aef.encode(-(10.5f64 / 127.5).powi(2) * (1.0 + 1e-12)), -11.0);
+        assert_eq!(aef.encode(2.0), 127.0);
+        assert_eq!(aef.encode(-2.0), -128.0);
+        assert!(aef.encode(f64::NAN).is_nan());
+        assert!(aef.decode(f64::NAN).is_nan());
+        assert_eq!(aef.code_type(), ColumnType::Int8);
+        let lut = aef.byte_values(ColumnType::Int8);
+        assert_eq!(lut[0x80], aef.decode(-128.0));
+        assert_eq!(lut[0x7f], aef.decode(127.0));
     }
 }

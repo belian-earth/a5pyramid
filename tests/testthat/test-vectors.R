@@ -103,7 +103,7 @@ test_that("Arrow fixed-size lists and binary are vector columns", {
 test_that("bad vector columns are refused", {
   x <- vector_leaves()
   err <- function(...) expect_error(a5_pyramid(x, emb, ...), class = "a5pyramid_error_input")
-  err(reducers = c(emb = "mean"))
+  err(reducers = c(emb = "sum"))
   err(types = c(emb = "int16"))
   err(rep_sd = c(emb = 0))
   y <- x

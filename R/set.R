@@ -77,6 +77,7 @@ a5_write_pyramid_set <- function(x,
                                  weights = NULL,
                                  types = NULL,
                                  rep_sd = NULL,
+                                 codecs = NULL,
                                  compression = c("snappy", "zstd", "none"),
                                  metadata = NULL,
                                  threads = NULL) {
@@ -96,7 +97,7 @@ a5_write_pyramid_set <- function(x,
   meta <- check_metadata(metadata)
   tiers <- check_tiers(tiers)
   threads <- resolve_threads(threads)
-  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd)
+  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd, codecs)
   if (is.null(tiers)) {
     tiers <- a5_pyramid_set_tiers(input$resolution, input$lods)
   } else if (is.null(lods)) {
@@ -160,7 +161,8 @@ a5_pyramid_set_tiers <- function(data_resolution, lods = NULL) {
 #'   - `data_resolution`: the leaves' resolution.
 #'   - `bbox`: `c(xmin, ymin, xmax, ymax)` of every shard.
 #'   - `columns`: a tibble of the value columns' `name`, `type`,
-#'     `reducer` and `sd`, the standard deviation that scaled a
+#'     `reducer`, `codec` (see [a5_pyramid()]; `NA` for a column that
+#'     stores its values) and `sd`, the standard deviation that scaled a
 #'     `"rep_child"` column (1 where the leaves' standard deviation is 0 or
 #'     undefined; `NA` for other reducers and older files), and `dim`, the
 #'     elements per cell of a vector column (`NA` for scalar columns).

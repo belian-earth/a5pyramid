@@ -76,11 +76,19 @@ its two's complement for `int8`. hyparquet returns each row as a
 `Uint8Array` of `dim` bytes; read `int8` elements through an `Int8Array`
 view of the same bytes. A vector is never null.
 
-A vector column is always reduced by `rep_child` (see "Levels"), with every
-element taking part in the distance to the cell's mean and one `sd` for all
-its elements. A writer computes that `sd` over every element of every leaf,
-pooled: the sample standard deviation (n − 1) about the elements' grand
-mean, or 1 where it is 0 or undefined. When the vector is a pyramid's only
+A vector column is reduced by `rep_child` or by `mean` (see "Levels").
+
+A `mean` vector is reduced element by element: each element of a coarse
+cell is the (weighted) mean of its leaves' elements, of their decoded values
+where the column has a `codec` (see "Codecs"), stored as the column's type.
+A vector is never null, so a cell whose leaves all have weight 0 takes their
+unweighted mean. A `mean` vector takes no part in choosing representatives.
+
+In a `rep_child` vector every element takes part in the distance to the
+cell's mean, with one `sd` for all its elements. A writer computes that
+`sd` over every element of every leaf, pooled: the sample standard
+deviation (n − 1) about the elements' grand mean, or 1 where it is 0 or
+undefined. When the vector is a pyramid's only
 `rep_child` input, its `sd` scales every term of the distance alike and
 cannot change a cell's representative, so builds of separate parts of a
 region need not fix it (cells at the seams still differ, as their leaves
@@ -158,7 +166,7 @@ The index of a small file (1,024 leaves at resolution 15, levels at 11 and
 | `data_resolution` | The leaves' resolution. In a single file it is the finest level's `lod`; a shard of a tier coarser than the leaves holds no level at it. |
 | `tile_size` | The most rows in a tile. |
 | `bbox` | `[west, south, east, north]` (see "Boxes"): in a single file, of the leaves; in a shard, of every tile, since coarse cells reach past the leaves under them. |
-| `columns` | The value columns in column order: `name`, storage `type` and `reducer` (see "Levels"), and for a `rep_child` column `sd`, the standard deviation that scaled it (1 where the leaves' standard deviation is 0 or undefined, as for a constant column, so `sd` is the scale used rather than a statistic of the data). `sd` is optional (absent before 2026-11-09), and readers that do not choose representatives ignore it. A vector column (version 3) also has `dim`, its elements per row. |
+| `columns` | The value columns in column order: `name`, storage `type` and `reducer` (see "Levels"), and for a `rep_child` column `sd`, the standard deviation that scaled it (1 where the leaves' standard deviation is 0 or undefined, as for a constant column, so `sd` is the scale used rather than a statistic of the data). `sd` is optional (absent before 2026-11-09), and readers that do not choose representatives ignore it. A `mean` column of codes has `codec`, how its codes map to values (see "Codecs"); the field is optional, added without a version change (absent before 2026-11-11 and for columns that store their values), and a reader that ignores it reads the codes. A vector column (version 3) also has `dim`, its elements per row. |
 | `levels` | One entry per level, ascending `lod`: its `lod`, its number of `rows`, and the half-open range `[start, end)` of its tiles. Consecutive levels' ranges meet, and together cover every tile. |
 | `tile_bbox` | The box of every tile in order, flat: tile `i` is at indices `4i` to `4i + 3`. |
 | `shard` | Shards only (version 2): `{"tier", "cell", "resolution"}`, the shard's tier, its shard cell as 16 hex digits, and that cell's resolution. Absent in a single file. |
@@ -195,10 +203,10 @@ Each value column is reduced over the leaves under each cell by its
 
 | Reducer | Value of a coarse cell |
 |---|---|
-| `mean` | The mean, weighted by the leaves' weights when the writer had them. |
+| `mean` | The mean, weighted by the leaves' weights when the writer had them. With a `codec`, the code of the mean of the leaves' decoded values. |
 | `sum`, `min`, `max` | The sum, minimum or maximum. |
 | `mode` | The most frequent value (by total weight), ties to the smallest. |
-| `rep_child` | The value of one *representative* leaf, the same leaf for every `rep_child` column: the leaf closest to the cell's mean over all `rep_child` columns, each divided by its standard deviation (the column's `sd`: over the leaves, or fixed by the writer), and over every element of the vector columns, each divided by its column's one `sd`. Ties go to the lowest cell id. |
+| `rep_child` | The value of one *representative* leaf, the same leaf for every `rep_child` column: the leaf closest to the cell's mean over all `rep_child` columns, each divided by its standard deviation (the column's `sd`: over the leaves, or fixed by the writer), and over every element of the `rep_child` vector columns, each divided by its column's one `sd`. Ties go to the lowest cell id. |
 
 With `sd` computed over the leaves, a cell's representative depends on every
 leaf of the build, so pyramids of different parts of a region can choose
@@ -208,6 +216,24 @@ region built one at a time, fix `sd` to the same values.
 Missing values are skipped; a cell whose leaves are all missing has a null
 value. Values are stored as their column's type at every level: integer types
 round half to even and clamp to their range.
+
+### Codecs
+
+A column whose `codec` is set stores *codes*, and its values are the codes
+decoded. A `mean` over it decodes each leaf's code, takes the (weighted)
+mean of the values and encodes the mean, so a coarse cell holds the code of
+the mean of its leaves' values. A nonlinear code does not commute with the
+mean: the mean of the codes is not the code of the mean. The leaves hold the
+codes the writer was given. A reader decodes a column's codes with its codec.
+
+| Codec | Codes | Decode (code `x` to value) | Encode (value `v` to code) |
+|---|---|---|---|
+| `aef` | `int8` | `sign(x) * (x / 127.5)^2` | `round(sign(v) * sqrt(abs(v)) * 127.5)`, rounded half away from zero, clamped to -128 to 127 |
+
+`aef` is the code of AlphaEarth Foundations embeddings. Its encoding is that
+of the a5embeddings store's cell means, so a coarse cell of a pyramid built
+from the store's leaves holds the code the store would write for the mean of
+those leaves' decoded embeddings.
 
 ## Encodings and compression
 

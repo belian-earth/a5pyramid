@@ -18,7 +18,8 @@ A list of class \code{a5pyramid_set_info}:
 \item \code{data_resolution}: the leaves' resolution.
 \item \code{bbox}: \code{c(xmin, ymin, xmax, ymax)} of every shard.
 \item \code{columns}: a tibble of the value columns' \code{name}, \code{type},
-\code{reducer} and \code{sd}, the standard deviation that scaled a
+\code{reducer}, \code{codec} (see \code{\link[=a5_pyramid]{a5_pyramid()}}; \code{NA} for a column that
+stores its values) and \code{sd}, the standard deviation that scaled a
 \code{"rep_child"} column (1 where the leaves' standard deviation is 0 or
 undefined; \code{NA} for other reducers and older files), and \code{dim}, the
 elements per cell of a vector column (\code{NA} for scalar columns).

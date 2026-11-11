@@ -19,7 +19,8 @@
 #'   - `tile_size`: the most rows in a tile.
 #'   - `bbox`: `c(xmin, ymin, xmax, ymax)` of the leaves.
 #'   - `columns`: a tibble of the value columns' `name`, `type`,
-#'     `reducer` and `sd`, the standard deviation that scaled a
+#'     `reducer`, `codec` (see [a5_pyramid()]; `NA` for a column that
+#'     stores its values) and `sd`, the standard deviation that scaled a
 #'     `"rep_child"` column (1 where the leaves' standard deviation is 0 or
 #'     undefined; `NA` for other reducers and older files), and `dim`, the
 #'     elements per cell of a vector column (`NA` for scalar columns).
@@ -99,7 +100,8 @@ print.a5pyramid_info <- function(x, ...) {
     as.character(x$lods)
   }
   cols <- if (nrow(x$columns) > 0L) {
-    paste0(x$columns$name, " <", x$columns$type, ", ", x$columns$reducer, ">", collapse = ", ")
+    codec <- ifelse(is.na(x$columns$codec), "", paste0(", ", x$columns$codec))
+    paste0(x$columns$name, " <", x$columns$type, ", ", x$columns$reducer, codec, ">", collapse = ", ")
   } else {
     "none"
   }

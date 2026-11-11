@@ -15,6 +15,7 @@ a5_write_pyramid_set(
   weights = NULL,
   types = NULL,
   rep_sd = NULL,
+  codecs = NULL,
   compression = c("snappy", "zstd", "none"),
   metadata = NULL,
   threads = NULL
@@ -72,6 +73,10 @@ representatives differently even where their cells are the same; fix
 the standard deviations (from a whole-region build's
 \code{a5_pyramid_info()$columns$sd}, say) for builds whose cells must
 agree.}
+
+\item{codecs}{Named character vector of codecs for \code{"mean"} columns
+whose values are codes, such as \code{c(embedding = "aef")}. See "Codecs".
+Default \code{NULL}: every column stores its values.}
 
 \item{compression}{\code{"snappy"} (default), \code{"zstd"} or \code{"none"}. hyparquet
 decodes snappy itself; zstd needs the \code{hyparquet-compressors} package

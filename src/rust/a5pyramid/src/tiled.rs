@@ -521,6 +521,42 @@ mod tests {
     }
 
     #[test]
+    fn the_index_records_codecs_and_mean_vectors() {
+        let cells = crate::testutil::grid(12, (10.0, 10.5), (50.0, 50.3), 120);
+        let n = cells.len();
+        let bytes: Vec<u8> = (0..n * 8).map(|i| (i * 31 % 256) as u8).collect();
+        let leaves = Leaves {
+            cells,
+            columns: vec![
+                Column::new("q", ColumnType::Int8, Reducer::Mean, vec![3.0; n]).with_codec(crate::Codec::Aef),
+                Column::new("v", ColumnType::Float32, Reducer::Mean, vec![1.0; n]),
+            ],
+            vectors: vec![crate::VectorColumn::new("emb", ColumnType::Int8, 8, bytes)
+                .with_reducer(Reducer::Mean)
+                .with_codec(crate::Codec::Aef)],
+            ..Default::default()
+        };
+        let p = build(leaves, &[8, 10], &Cancel::new()).unwrap();
+        let tiled = TiledPyramid::new(p, &opts(), &Cancel::new()).unwrap();
+        let col = |name: &str| tiled.meta().columns.iter().find(|c| c.name == name).unwrap().clone();
+        let (q, v, emb) = (col("q"), col("v"), col("emb"));
+        assert_eq!((q.reducer.as_str(), q.codec.as_deref()), ("mean", Some("aef")));
+        assert_eq!(v.codec, None);
+        assert_eq!(
+            (emb.reducer.as_str(), emb.codec.as_deref(), emb.sd, emb.dim),
+            ("mean", Some("aef"), None, Some(8))
+        );
+        let json = tiled.meta().to_json().unwrap();
+        assert_eq!(json.matches("\"codec\":\"aef\"").count(), 2);
+        let dir = tempdir("codecs");
+        let path = dir.join("p.parquet");
+        crate::write_parquet(&tiled, &path, &Default::default(), &Cancel::new()).unwrap();
+        let f = crate::PyramidFile::open(&path).unwrap();
+        assert_eq!(f.meta.columns, tiled.meta().columns);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn files_without_vectors_keep_version_1() {
         let tiled = TiledPyramid::new(sample(), &opts(), &Cancel::new()).unwrap();
         assert_eq!(tiled.meta().format_version, 1);

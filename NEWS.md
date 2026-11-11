@@ -1,5 +1,21 @@
 # a5pyramid (development version)
 
+* Codecs: `codecs = c(embedding = "aef")` gives a `mean` column of codes
+  the mean of the values they stand for. Each leaf's code is decoded, the
+  (weighted) mean taken and the result encoded, so a coarse cell holds the
+  code of the mean rather than the mean of the codes, which differ for a
+  nonlinear code. `"aef"` is the AlphaEarth Foundations int8 code, encoded
+  as the a5embeddings store encodes its cell means (rounded half away from
+  zero, clamped to -128 to 127). The index records each column's `codec`
+  (`columns$codec` in the info functions), an optional field added without
+  a format version change. In the crate: `Codec`, `ColumnSpec::codec`,
+  `VectorSpec::codec`.
+* Vector columns can be reduced by `mean`, element by element, as well as
+  `rep_child`: `reducers = c(embedding = "mean")`. Vectors stay
+  `rep_child` by default, whatever `aggregate` says, and a `mean` vector
+  takes no part in choosing representatives. In the crate:
+  `VectorSpec::reducer`, `VectorColumn::with_reducer()`.
+
 * Vector columns (format version 3): a fixed number of `int8` or `uint8`
   values per cell, such as a 64-element embedding, from an integer matrix
   column of a data frame or a fixed-size list (DuckDB's `TINYINT[64]`) in
