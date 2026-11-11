@@ -13,6 +13,7 @@ a5_pyramid(
   weights = NULL,
   types = NULL,
   rep_sd = NULL,
+  codecs = NULL,
   threads = NULL
 )
 }
@@ -61,6 +62,10 @@ the standard deviations (from a whole-region build's
 \code{a5_pyramid_info()$columns$sd}, say) for builds whose cells must
 agree.}
 
+\item{codecs}{Named character vector of codecs for \code{"mean"} columns
+whose values are codes, such as \code{c(embedding = "aef")}. See "Codecs".
+Default \code{NULL}: every column stores its values.}
+
 \item{threads}{Number of threads, or \code{NULL} (default) for
 \code{\link[=a5pyramid_threads]{a5pyramid_threads()}}.}
 }
@@ -97,7 +102,9 @@ the leaves directly, never from the level below, and matches
 Each value column is reduced over the leaves under each coarser cell by
 its reducer, \code{aggregate} unless \code{reducers} names another:
 \itemize{
-\item \code{"mean"}: the mean, weighted by \code{weights} when given.
+\item \code{"mean"}: the mean, weighted by \code{weights} when given. For a column of
+codes with a codec (see "Codecs"), the code of the mean of the decoded
+values.
 \item \code{"sum"}, \code{"min"}, \code{"max"}: the sum, minimum or maximum.
 \item \code{"mode"}: the most frequent value, by total weight when \code{weights} is
 given, ties going to the smallest value. For category codes.
@@ -123,11 +130,17 @@ an embedding: an integer matrix column of a data frame (one row per
 cell), or a fixed-size list of \code{int8} or \code{uint8} (or fixed-size binary,
 read as \code{uint8} unless \code{types} says \code{"int8"}, as arrow reads a version-3
 file's vectors) in Arrow data, as DuckDB writes \code{TINYINT[64]}. Its type
-is \code{"int8"} (default for a matrix) or \code{"uint8"}, and it is always reduced
-by \code{"rep_child"}: every element takes part in the distance to the cell's
-mean, scaled by one standard deviation over all the elements (fixed by
-\code{rep_sd} like any other column), so a coarse cell holds the whole vector
-of one leaf. A file stores it as one fixed-length binary column, so a
+is \code{"int8"} (default for a matrix) or \code{"uint8"}. It is reduced by
+\code{"rep_child"} whatever \code{aggregate} says: every element takes part in the
+distance to the cell's mean, scaled by one standard deviation over all
+the elements (fixed by \code{rep_sd} like any other column), so a coarse cell
+holds the whole vector of one leaf. Named \code{"mean"} in \code{reducers}, it is
+reduced element by element instead: each element of a coarse cell is the
+(weighted) mean of its leaves' elements, of their decoded values with a
+codec, stored as the vector's type; a cell whose leaves all have weight 0
+takes their unweighted mean, since a vector is never missing. A mean
+vector takes no part in choosing representatives. A file stores a vector
+as one fixed-length binary column, so a
 64-element vector costs one column's metadata a tile rather than 64, and
 one byte an element. Files with a vector column are format version 3.
 \code{a5_pyramid()} and \code{\link[=a5_read_pyramid]{a5_read_pyramid()}} return it as an integer matrix
@@ -150,6 +163,33 @@ colour channel is a valid channel, and \code{"float32"} rounds to single
 precision. \code{a5_pyramid()} returns the stored values. For a browser,
 \code{"uint8"} suits colour channels and \code{"float32"} halves the size of
 continuous values.
+}
+
+\section{Codecs}{
+
+A \emph{codec} says how a column's stored codes map to the values they stand
+for. With one, a \code{"mean"} decodes each leaf's code, takes the (weighted)
+mean of the values and encodes it, so a coarse cell holds the code of the
+mean of its leaves' values rather than the mean of their codes, which
+differ for a nonlinear code. The leaves keep their codes as given. The
+codec is recorded in the index (\code{\link[=a5_pyramid_info]{a5_pyramid_info()}}) for readers to
+decode with. One codec is defined:
+\itemize{
+\item \code{"aef"}: AlphaEarth Foundations embeddings, \code{"int8"} codes decoded as
+\code{sign(x) * (x / 127.5)^2} and encoded as
+\code{round(sign(v) * sqrt(abs(v)) * 127.5)}, rounded half away from zero and
+clamped to -128 to 127, as the a5embeddings store encodes its cell
+means. A coarse cell holds the code the store would write for the mean
+of its leaves' decoded embeddings; with each leaf's pixel count as
+\code{weights}, for the mean of their pixels, up to the leaves' own
+rounding. The mean is taken on \code{x * abs(x)}, the value times 127.5^2,
+which is exact for whole codes and weights, so a mean exactly half way
+between two codes rounds away from zero whatever the order of the
+sum.
+}
+
+A codec applies to \code{"mean"} columns, scalar or vector, stored as its code
+type.
 }
 
 \examples{

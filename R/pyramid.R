@@ -17,7 +17,9 @@
 #' @section Reducers:
 #' Each value column is reduced over the leaves under each coarser cell by
 #' its reducer, `aggregate` unless `reducers` names another:
-#' - `"mean"`: the mean, weighted by `weights` when given.
+#' - `"mean"`: the mean, weighted by `weights` when given. For a column of
+#'   codes with a codec (see "Codecs"), the code of the mean of the decoded
+#'   values.
 #' - `"sum"`, `"min"`, `"max"`: the sum, minimum or maximum.
 #' - `"mode"`: the most frequent value, by total weight when `weights` is
 #'   given, ties going to the smallest value. For category codes.
@@ -40,11 +42,17 @@
 #' cell), or a fixed-size list of `int8` or `uint8` (or fixed-size binary,
 #' read as `uint8` unless `types` says `"int8"`, as arrow reads a version-3
 #' file's vectors) in Arrow data, as DuckDB writes `TINYINT[64]`. Its type
-#' is `"int8"` (default for a matrix) or `"uint8"`, and it is always reduced
-#' by `"rep_child"`: every element takes part in the distance to the cell's
-#' mean, scaled by one standard deviation over all the elements (fixed by
-#' `rep_sd` like any other column), so a coarse cell holds the whole vector
-#' of one leaf. A file stores it as one fixed-length binary column, so a
+#' is `"int8"` (default for a matrix) or `"uint8"`. It is reduced by
+#' `"rep_child"` whatever `aggregate` says: every element takes part in the
+#' distance to the cell's mean, scaled by one standard deviation over all
+#' the elements (fixed by `rep_sd` like any other column), so a coarse cell
+#' holds the whole vector of one leaf. Named `"mean"` in `reducers`, it is
+#' reduced element by element instead: each element of a coarse cell is the
+#' (weighted) mean of its leaves' elements, of their decoded values with a
+#' codec, stored as the vector's type; a cell whose leaves all have weight 0
+#' takes their unweighted mean, since a vector is never missing. A mean
+#' vector takes no part in choosing representatives. A file stores a vector
+#' as one fixed-length binary column, so a
 #' 64-element vector costs one column's metadata a tile rather than 64, and
 #' one byte an element. Files with a vector column are format version 3.
 #' `a5_pyramid()` and [a5_read_pyramid()] return it as an integer matrix
@@ -65,6 +73,29 @@
 #' precision. `a5_pyramid()` returns the stored values. For a browser,
 #' `"uint8"` suits colour channels and `"float32"` halves the size of
 #' continuous values.
+#'
+#' @section Codecs:
+#' A *codec* says how a column's stored codes map to the values they stand
+#' for. With one, a `"mean"` decodes each leaf's code, takes the (weighted)
+#' mean of the values and encodes it, so a coarse cell holds the code of the
+#' mean of its leaves' values rather than the mean of their codes, which
+#' differ for a nonlinear code. The leaves keep their codes as given. The
+#' codec is recorded in the index ([a5_pyramid_info()]) for readers to
+#' decode with. One codec is defined:
+#' - `"aef"`: AlphaEarth Foundations embeddings, `"int8"` codes decoded as
+#'   `sign(x) * (x / 127.5)^2` and encoded as
+#'   `round(sign(v) * sqrt(abs(v)) * 127.5)`, rounded half away from zero and
+#'   clamped to -128 to 127, as the a5embeddings store encodes its cell
+#'   means. A coarse cell holds the code the store would write for the mean
+#'   of its leaves' decoded embeddings; with each leaf's pixel count as
+#'   `weights`, for the mean of their pixels, up to the leaves' own
+#'   rounding. The mean is taken on `x * abs(x)`, the value times 127.5^2,
+#'   which is exact for whole codes and weights, so a mean exactly half way
+#'   between two codes rounds away from zero whatever the order of the
+#'   sum.
+#'
+#' A codec applies to `"mean"` columns, scalar or vector, stored as its code
+#' type.
 #'
 #' @param x A data frame with one [a5R::a5_cell] column, an [a5R::a5_cell]
 #'   vector, or Arrow data with one `uint64` column of cells: an Arrow
@@ -102,6 +133,9 @@
 #'   the standard deviations (from a whole-region build's
 #'   `a5_pyramid_info()$columns$sd`, say) for builds whose cells must
 #'   agree.
+#' @param codecs Named character vector of codecs for `"mean"` columns
+#'   whose values are codes, such as `c(embedding = "aef")`. See "Codecs".
+#'   Default `NULL`: every column stores its values.
 #' @param threads Number of threads, or `NULL` (default) for
 #'   [a5pyramid_threads()].
 #'
@@ -142,10 +176,11 @@ a5_pyramid <- function(x,
                        weights = NULL,
                        types = NULL,
                        rep_sd = NULL,
+                       codecs = NULL,
                        threads = NULL) {
   aggregate <- rlang::arg_match(aggregate)
   threads <- resolve_threads(threads)
-  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd)
+  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd, codecs)
   out <- rs_call(a5pyramid_build_rs(
     leaves = input$leaves,
     lods = input$lods,
@@ -223,6 +258,7 @@ a5_write_pyramid <- function(x,
                              weights = NULL,
                              types = NULL,
                              rep_sd = NULL,
+                             codecs = NULL,
                              tile_size = 4096L,
                              compression = c("snappy", "zstd", "none"),
                              metadata = NULL,
@@ -237,7 +273,7 @@ a5_write_pyramid <- function(x,
   tile_size <- check_count(tile_size)
   meta <- check_metadata(metadata)
   threads <- resolve_threads(threads)
-  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd)
+  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd, codecs)
   rs_call(a5pyramid_write_rs(
     leaves = input$leaves,
     lods = input$lods,
@@ -303,6 +339,7 @@ a5_pyramid_arrow <- function(x,
                              weights = NULL,
                              types = NULL,
                              rep_sd = NULL,
+                             codecs = NULL,
                              tile_size = 4096L,
                              metadata = NULL,
                              threads = NULL) {
@@ -311,7 +348,7 @@ a5_pyramid_arrow <- function(x,
   tile_size <- check_count(tile_size)
   meta <- check_metadata(metadata)
   threads <- resolve_threads(threads)
-  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd)
+  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd, codecs)
   stream <- rs_call(a5pyramid_arrow_rs(
     leaves = input$leaves,
     lods = input$lods,
@@ -335,6 +372,8 @@ pyramid_tibble <- function(out) {
 
 PYRAMID_TYPES <- c("int8", "int16", "int32", "uint8", "uint16", "uint32", "float32", "float64")
 PYRAMID_REDUCERS <- c("mean", "sum", "min", "max", "mode", "rep_child")
+# the codecs and the storage type of each one's codes
+PYRAMID_CODECS <- c(aef = "int8")
 RESERVED_COLUMNS <- c("cell", "lod", "ncell")
 # the A5 index version of the ids, as across the a5R stack
 A5_INDEX <- "1.0"
@@ -343,7 +382,7 @@ A5_INDEX <- "1.0"
 #' resolve them to what the Rust entry points take.
 #' @noRd
 pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
-                          rep_sd = NULL, call = rlang::caller_env()) {
+                          rep_sd = NULL, codecs = NULL, call = rlang::caller_env()) {
   check_not_covering(x, call)
   arrow_src <- NULL
   if (is_arrow_data(x)) {
@@ -375,6 +414,7 @@ pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
   types_v <- resolve_types(df, names, types, call, arrow_types = arrow_src$types, dims = dims,
                            arrow_vectors = arrow_src$vectors)
   sd_v <- resolve_sd(rep_sd, names, reducers_v, call)
+  codecs_v <- resolve_codecs(codecs, names, reducers_v, types_v, call)
 
   # the leaves, converted for the engine: from R vectors, or read from the
   # Arrow data batch by batch without passing through R
@@ -385,6 +425,7 @@ pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
       names = names,
       types = unname(types_v),
       reducers = unname(reducers_v),
+      codecs = unname(codecs_v),
       weights = weights_v,
       sd = sd_v,
       dims = unname(dims)
@@ -398,6 +439,7 @@ pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
       names = names,
       types = unname(types_v),
       reducers = unname(reducers_v),
+      codecs = unname(codecs_v),
       weights = if (is.null(weights)) "" else weights,
       sd = sd_v,
       dims = unname(dims)
@@ -635,13 +677,14 @@ resolve_reducers <- function(names, aggregate, reducers, weights, call, dims = i
   out <- rep(aggregate, length(names))
   names(out) <- names
   if (!is.null(weights) && weights %in% names) out[[weights]] <- "sum"
-  # vector columns are reduced by rep_child, whatever the aggregate
+  # vector columns are reduced by rep_child whatever the aggregate, or by
+  # mean where `reducers` says so
   vec <- names[dims[names] > 0L]
-  bad <- vec[vec %in% names(given) & given[vec] != "rep_child"]
+  bad <- vec[vec %in% names(given) & !given[vec] %in% c("rep_child", "mean")]
   if (length(bad) > 0L) {
     a5pyramid_abort("input", c(
-      "Vector column{?s} {.field {bad}} can only be reduced by {.val rep_child}.",
-      "i" = "A coarse cell takes the vector of one representative leaf."
+      "Vector column{?s} {.field {bad}} can only be reduced by {.val rep_child} or {.val mean}.",
+      "i" = "A coarse cell takes the vector of one representative leaf, or the mean of its leaves' vectors."
     ), call = call)
   }
   out[vec] <- "rep_child"
@@ -680,6 +723,36 @@ resolve_types <- function(df, names, types, call, arrow_types = NULL, dims = int
     }
   }
   out[names(given)] <- given
+  out
+}
+
+#' Each value column's codec, `""` for none: a codec applies to a
+#' `"mean"` column of its code type
+#' @noRd
+resolve_codecs <- function(codecs, names, reducers, types, call) {
+  given <- check_named_choice(codecs, "codecs", names, names(PYRAMID_CODECS), call)
+  out <- rep("", length(names))
+  names(out) <- names
+  if (length(given) == 0L) {
+    return(out)
+  }
+  cols <- names(given)
+  not_mean <- cols[reducers[cols] != "mean"]
+  if (length(not_mean) > 0L) {
+    a5pyramid_abort("input", c(
+      "A codec applies to {.val mean} columns, but {.field {not_mean}} {?is/are} reduced by {.val {unique(reducers[not_mean])}}.",
+      "i" = "Set the reducer with {.arg reducers}, as {.code c({not_mean[1]} = \"mean\")}."
+    ), call = call)
+  }
+  wrong <- cols[types[cols] != unname(PYRAMID_CODECS[given])]
+  if (length(wrong) > 0L) {
+    codec <- given[[wrong[1]]]
+    a5pyramid_abort("input", c(
+      "Codec {.val {codec}} decodes {.val {PYRAMID_CODECS[[codec]]}} codes, but {.field {wrong[1]}} is {.val {types[[wrong[1]]]}}.",
+      "i" = "Store the codes as {.val {PYRAMID_CODECS[[codec]]}} with {.arg types}."
+    ), call = call)
+  }
+  out[cols] <- given
   out
 }
 

@@ -79,13 +79,15 @@ pub(crate) fn column_meta(columns: &[crate::ColumnSpec], vectors: &[crate::Vecto
         name: c.name.clone(),
         ty: c.ty.as_str().to_string(),
         reducer: c.reducer.as_str().to_string(),
+        codec: c.codec.map(|k| k.as_str().to_string()),
         sd: c.sd,
         dim: None,
     });
     let vecs = vectors.iter().map(|v| ColumnMeta {
         name: v.name.clone(),
         ty: v.ty.as_str().to_string(),
-        reducer: crate::Reducer::RepChild.as_str().to_string(),
+        reducer: v.reducer.as_str().to_string(),
+        codec: v.codec.map(|k| k.as_str().to_string()),
         sd: v.sd,
         dim: Some(v.dim),
     });
@@ -109,6 +111,12 @@ pub struct ColumnMeta {
     #[serde(rename = "type")]
     pub ty: String,
     pub reducer: String,
+    /// The codec of a `mean` column whose values are stored as codes, such
+    /// as `"aef"` ([`crate::Codec`]): coarse cells hold the code of the
+    /// mean of their leaves' decoded values. Absent for other columns and
+    /// in files written before 2026-11-11.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
     /// For a `rep_child` column, the standard deviation that scaled it in
     /// the choice of representatives ([`crate::ColumnSpec::sd`]); absent for
     /// other reducers and in files written before 2026-11-09.

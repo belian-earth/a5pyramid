@@ -10,7 +10,7 @@ use arrow_schema::DataType;
 use extendr_api::prelude::*;
 
 use a5pyramid::{
-    build, default_tiers, write_parquet, write_set, Bbox, Column, ColumnSpec, ColumnType, Compression, Leaves,
+    build, default_tiers, write_parquet, write_set, Bbox, Codec, Column, ColumnSpec, ColumnType, Compression, Leaves,
     ParquetOptions, Pyramid, PyramidFile, Reducer, SetMeta, SetOptions, ShardEntry, Tier, TileOptions, TiledPyramid,
     VectorColumn,
 };
@@ -58,6 +58,7 @@ fn leaves_from_r(
     names: &[String],
     types: &[String],
     reducers: &[String],
+    codecs: &[String],
     weights: &Robj,
     sd: &[f64],
     dims: &[i32],
@@ -72,7 +73,7 @@ fn leaves_from_r(
     if values.len() != names.len() || dims.len() != names.len() {
         return Err(other("internal error: value columns, names and dims differ in length"));
     }
-    let specs = column_specs(names, types, reducers, sd)?;
+    let specs = column_specs(names, types, reducers, codecs, sd)?;
     let mut columns = Vec::with_capacity(values.len());
     let mut vectors = Vec::new();
     for (k, (_, col)) in values.iter().enumerate() {
@@ -155,25 +156,44 @@ fn vector_from_r(m: &Robj, spec: &ColumnSpec, dim: usize, n: usize, keep: Option
             bytes.push(x as i8 as u8);
         }
     }
-    let mut out = VectorColumn::new(name.clone(), spec.ty, dim, bytes);
-    out.spec.sd = spec.sd;
-    Ok(out)
+    Ok(vector_column(spec.clone(), dim, bytes))
 }
 
-/// The value columns' specs, from R's names, types, reducers and standard
-/// deviations (NA where not given).
-fn column_specs(names: &[String], types: &[String], reducers: &[String], sd: &[f64]) -> Result<Vec<ColumnSpec>> {
-    if names.len() != types.len() || types.len() != reducers.len() || reducers.len() != sd.len() {
+/// A vector column of `dim` elements from its spec (name, element type,
+/// reducer, codec and standard deviation) and its bytes.
+fn vector_column(spec: ColumnSpec, dim: usize, bytes: Vec<u8>) -> VectorColumn {
+    let mut out = VectorColumn::new(spec.name, spec.ty, dim, bytes).with_reducer(spec.reducer);
+    out.spec.codec = spec.codec;
+    out.spec.sd = spec.sd;
+    out
+}
+
+/// The value columns' specs, from R's names, types, reducers, codecs (`""`
+/// for none) and standard deviations (NA where not given).
+fn column_specs(
+    names: &[String],
+    types: &[String],
+    reducers: &[String],
+    codecs: &[String],
+    sd: &[f64],
+) -> Result<Vec<ColumnSpec>> {
+    let n = names.len();
+    if types.len() != n || reducers.len() != n || codecs.len() != n || sd.len() != n {
         return Err(other(
-            "internal error: names, types, reducers and standard deviations differ in length",
+            "internal error: names, types, reducers, codecs and standard deviations differ in length",
         ));
     }
-    (0..names.len())
+    (0..n)
         .map(|k| {
             Ok(ColumnSpec {
                 name: names[k].clone(),
                 ty: ColumnType::parse(&types[k]).map_err(r_error)?,
                 reducer: Reducer::parse(&reducers[k]).map_err(r_error)?,
+                codec: if codecs[k].is_empty() {
+                    None
+                } else {
+                    Some(Codec::parse(&codecs[k]).map_err(r_error)?)
+                },
                 sd: (!sd[k].is_nan()).then_some(sd[k]),
             })
         })
@@ -208,12 +228,13 @@ fn a5pyramid_leaves_rs(
     names: Vec<String>,
     types: Vec<String>,
     reducers: Vec<String>,
+    codecs: Vec<String>,
     weights: Robj,
     sd: Vec<f64>,
     dims: Vec<i32>,
 ) -> Result<Robj> {
     Ok(leaves_handle(leaves_from_r(
-        &cells, &values, &names, &types, &reducers, &weights, &sd, &dims,
+        &cells, &values, &names, &types, &reducers, &codecs, &weights, &sd, &dims,
     )?))
 }
 
@@ -263,11 +284,12 @@ fn a5pyramid_leaves_arrow_rs(
     names: Vec<String>,
     types: Vec<String>,
     reducers: Vec<String>,
+    codecs: Vec<String>,
     weights: String,
     sd: Vec<f64>,
     dims: Vec<i32>,
 ) -> Result<Robj> {
-    let specs = column_specs(&names, &types, &reducers, &sd)?;
+    let specs = column_specs(&names, &types, &reducers, &codecs, &sd)?;
     if dims.len() != names.len() {
         return Err(other("internal error: names and dims differ in length"));
     }
@@ -332,9 +354,7 @@ fn a5pyramid_leaves_arrow_rs(
     let mut vectors = Vec::new();
     for (((spec, v), b), &dim) in specs.into_iter().zip(values).zip(bytes).zip(&dims) {
         if dim > 0 {
-            let mut vc = VectorColumn::new(spec.name, spec.ty, dim as usize, b);
-            vc.spec.sd = spec.sd;
-            vectors.push(vc);
+            vectors.push(vector_column(spec, dim as usize, b));
         } else {
             columns.push(Column { spec, values: v });
         }
@@ -632,6 +652,15 @@ fn set_to_r(m: &SetMeta) -> Result<Robj> {
                 Robj::from(m.columns.iter().map(|c| c.reducer.clone()).collect::<Vec<_>>())
             ),
             (
+                "codec",
+                Robj::from(
+                    m.columns
+                        .iter()
+                        .map(|c| c.codec.as_deref().map_or(Rstr::na(), Rstr::from))
+                        .collect::<Vec<Rstr>>()
+                )
+            ),
+            (
                 "sd",
                 Robj::from(
                     m.columns
@@ -792,6 +821,15 @@ fn a5pyramid_info_rs(src: String) -> Result<Robj> {
             (
                 "reducer",
                 Robj::from(m.columns.iter().map(|c| c.reducer.clone()).collect::<Vec<_>>())
+            ),
+            (
+                "codec",
+                Robj::from(
+                    m.columns
+                        .iter()
+                        .map(|c| c.codec.as_deref().map_or(Rstr::na(), Rstr::from))
+                        .collect::<Vec<Rstr>>()
+                )
             ),
             (
                 "sd",

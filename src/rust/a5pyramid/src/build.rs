@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use rayon::prelude::*;
 
 use crate::cancel::Cancel;
-use crate::column::{Column, ColumnSpec, ColumnType, Reducer, VectorColumn, VectorSpec};
+use crate::column::{Codec, Column, ColumnSpec, ColumnType, Reducer, VectorColumn, VectorSpec};
 use crate::error::{invalid, Error, Result};
 use crate::RESERVED_COLUMNS;
 
@@ -114,8 +114,8 @@ pub fn build(leaves: Leaves, lods: &[i32], cancel: &Cancel) -> Result<Pyramid> {
     for (&k, &sd) in rep.cols.iter().zip(&rep.sds) {
         columns[k].spec.sd = Some(sd);
     }
-    for (v, &sd) in vectors.iter_mut().zip(&rep.vec_sds) {
-        v.spec.sd = Some(sd);
+    for (&k, &sd) in rep.vecs.iter().zip(&rep.vec_sds) {
+        vectors[k].spec.sd = Some(sd);
     }
     // finest first, so the largest groupings (and any error) come early
     lods.sort_unstable_by(|a, b| b.cmp(a));
@@ -171,6 +171,7 @@ fn check_columns(columns: &[Column], n: usize) -> Result<()> {
                 col.values.len()
             )));
         }
+        check_codec(name, col.spec.codec, col.spec.reducer, col.spec.ty)?;
         if let Some(sd) = col.spec.sd {
             if col.spec.reducer != Reducer::RepChild {
                 return Err(invalid(format!(
@@ -220,13 +221,46 @@ fn check_vectors(vectors: &[VectorColumn], columns: &[Column], n: usize) -> Resu
                 v.values.len()
             )));
         }
+        if !matches!(v.spec.reducer, Reducer::RepChild | Reducer::Mean) {
+            return Err(invalid(format!(
+                "vector column {name:?} must be reduced by rep_child or mean, not {}",
+                v.spec.reducer.as_str()
+            )));
+        }
+        check_codec(name, v.spec.codec, v.spec.reducer, v.spec.ty)?;
         if let Some(sd) = v.spec.sd {
+            if v.spec.reducer != Reducer::RepChild {
+                return Err(invalid(format!(
+                    "vector column {name:?} has a standard deviation, which only rep_child vectors use"
+                )));
+            }
             if !(sd > 0.0 && sd.is_finite()) {
                 return Err(invalid(format!(
                     "the standard deviation of vector column {name:?} must be positive and finite, not {sd}"
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+/// A codec decodes codes for a mean, and its column must hold its codes.
+fn check_codec(name: &str, codec: Option<Codec>, reducer: Reducer, ty: ColumnType) -> Result<()> {
+    let Some(codec) = codec else { return Ok(()) };
+    if reducer != Reducer::Mean {
+        return Err(invalid(format!(
+            "column {name:?} has the codec {}, which applies to means, but is reduced by {}",
+            codec.as_str(),
+            reducer.as_str()
+        )));
+    }
+    if ty != codec.code_type() {
+        return Err(invalid(format!(
+            "column {name:?} has the codec {}, whose codes are {}, but is stored as {}",
+            codec.as_str(),
+            codec.code_type().as_str(),
+            ty.as_str()
+        )));
     }
     Ok(())
 }
@@ -356,12 +390,13 @@ fn sort_leaves(
 
 /// The `RepChild` columns and the scale (1 / standard deviation, given or
 /// over the leaves) that puts each on a common footing in the distance to
-/// the mean; every vector column takes part, with one scale for all its
-/// elements.
+/// the mean; every `RepChild` vector column takes part, with one scale for
+/// all its elements.
 struct RepSpec {
     cols: Vec<usize>,
     sds: Vec<f64>,
     scales: Vec<f64>,
+    vecs: Vec<usize>,
     vec_sds: Vec<f64>,
     vec_scales: Vec<f64>,
 }
@@ -379,22 +414,32 @@ impl RepSpec {
             .map(|&k| columns[k].spec.sd.unwrap_or_else(|| leaf_sd(&columns[k].values)))
             .collect();
         let scales = sds.iter().map(|sd| 1.0 / sd).collect();
-        let vec_sds: Vec<f64> = vectors
+        let vecs: Vec<usize> = vectors
             .iter()
-            .map(|v| v.spec.sd.unwrap_or_else(|| byte_sd(&v.values, v.spec.ty)))
+            .enumerate()
+            .filter(|(_, v)| v.spec.reducer == Reducer::RepChild)
+            .map(|(k, _)| k)
+            .collect();
+        let vec_sds: Vec<f64> = vecs
+            .iter()
+            .map(|&k| {
+                let v = &vectors[k];
+                v.spec.sd.unwrap_or_else(|| byte_sd(&v.values, v.spec.ty))
+            })
             .collect();
         let vec_scales = vec_sds.iter().map(|sd| 1.0 / sd).collect();
         Self {
             cols,
             sds,
             scales,
+            vecs,
             vec_sds,
             vec_scales,
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.cols.is_empty() && self.vec_sds.is_empty()
+        self.cols.is_empty() && self.vecs.is_empty()
     }
 }
 
@@ -496,13 +541,14 @@ fn build_level(
         Vec::new()
     } else {
         let rep_values: Vec<&[f64]> = rep.cols.iter().map(|&k| columns[k].values.as_slice()).collect();
-        let views: Vec<VecView> = vectors
+        let views: Vec<VecView> = rep
+            .vecs
             .iter()
             .zip(&rep.vec_scales)
-            .map(|(v, &scale)| VecView {
-                data: &v.values,
-                dim: v.spec.dim,
-                ty: v.spec.ty,
+            .map(|(&k, &scale)| VecView {
+                data: &vectors[k].values,
+                dim: vectors[k].spec.dim,
+                ty: vectors[k].spec.ty,
                 scale,
             })
             .collect();
@@ -527,27 +573,44 @@ fn build_level(
                 .into_par_iter()
                 .map_init(Vec::new, |scratch, g| mode(group(g), v, weights, scratch))
                 .collect(),
-            r => (0..n_groups)
-                .into_par_iter()
-                .map(|g| ty.quantise(reduce(r, group(g), v, weights)))
-                .collect(),
+            r => {
+                let codec = col.spec.codec;
+                (0..n_groups)
+                    .into_par_iter()
+                    .map(|g| ty.quantise(reduce(r, group(g), v, weights, codec)))
+                    .collect()
+            }
         };
         values.push(out);
         cancel.check()?;
     }
 
-    let out_vectors = vectors
-        .iter()
-        .map(|v| {
-            let dim = v.spec.dim;
-            let mut out = vec![0u8; n_groups * dim];
-            out.par_chunks_mut(dim).zip(rep_leaf.par_iter()).for_each(|(o, &i)| {
+    let mut out_vectors = Vec::with_capacity(vectors.len());
+    for v in vectors {
+        let dim = v.spec.dim;
+        let mut out = vec![0u8; n_groups * dim];
+        match v.spec.reducer {
+            Reducer::Mean => {
+                let lut = value_lut(v.spec.ty, v.spec.codec);
+                let mean = VecMean {
+                    data: &v.values,
+                    dim,
+                    ty: v.spec.ty,
+                    codec: v.spec.codec,
+                    lut: &lut,
+                };
+                out.par_chunks_mut(dim)
+                    .enumerate()
+                    .for_each_init(|| vec![0.0; dim], |acc, (g, o)| mean.reduce(group(g), weights, acc, o));
+            }
+            _ => out.par_chunks_mut(dim).zip(rep_leaf.par_iter()).for_each(|(o, &i)| {
                 let i = i as usize;
                 o.copy_from_slice(&v.values[i * dim..(i + 1) * dim]);
-            });
-            out
-        })
-        .collect();
+            }),
+        }
+        out_vectors.push(out);
+        cancel.check()?;
+    }
 
     Ok(Level {
         lod,
@@ -580,8 +643,10 @@ fn weight(weights: Option<&[f64]>, i: usize) -> f64 {
     weights.map_or(1.0, |w| w[i])
 }
 
-/// Mean, sum, min or max of the group's non-missing values.
-fn reduce(reducer: Reducer, group: &[(u64, u32)], v: &[f64], weights: Option<&[f64]>) -> f64 {
+/// Mean, sum, min or max of the group's non-missing values. A mean with a
+/// codec is the code of the mean of the decoded values, taken on the lifted
+/// codes ([`Codec::lift`]) so that integer codes and weights sum exactly.
+fn reduce(reducer: Reducer, group: &[(u64, u32)], v: &[f64], weights: Option<&[f64]>, codec: Option<Codec>) -> f64 {
     let present = group.iter().map(|&(_, i)| i as usize).filter(|&i| !v[i].is_nan());
     match reducer {
         Reducer::Mean => {
@@ -589,12 +654,12 @@ fn reduce(reducer: Reducer, group: &[(u64, u32)], v: &[f64], weights: Option<&[f
             for i in present {
                 let wi = weight(weights, i);
                 if wi > 0.0 {
-                    s += wi * v[i];
+                    s += wi * codec.map_or(v[i], |c| c.lift(v[i]));
                     w += wi;
                 }
             }
             if w > 0.0 {
-                s / w
+                codec.map_or(s / w, |c| c.lower(s / w))
             } else {
                 f64::NAN
             }
@@ -609,6 +674,74 @@ fn reduce(reducer: Reducer, group: &[(u64, u32)], v: &[f64], weights: Option<&[f
             .map(|i| v[i])
             .fold(f64::NAN, |a, x| if a.is_nan() || x > a { x } else { a }),
         Reducer::Mode | Reducer::RepChild => unreachable!("handled by the caller"),
+    }
+}
+
+/// The value of every byte of a vector column of `ty` elements: lifted
+/// with a codec ([`Codec::lift`]), else the element itself.
+fn value_lut(ty: ColumnType, codec: Option<Codec>) -> [f64; 256] {
+    match codec {
+        Some(c) => c.byte_values(ty),
+        None => {
+            let mut lut = [0.0; 256];
+            for (b, v) in lut.iter_mut().enumerate() {
+                *v = ty.byte_value(b as u8);
+            }
+            lut
+        }
+    }
+}
+
+/// A `Mean` vector column as its reduction reads it: the leaves' bytes and
+/// the value of each byte.
+struct VecMean<'a> {
+    data: &'a [u8],
+    dim: usize,
+    ty: ColumnType,
+    codec: Option<Codec>,
+    lut: &'a [f64; 256],
+}
+
+impl VecMean<'_> {
+    /// The group's (weighted) mean vector into `out`, element by element,
+    /// stored as the column's type: with a codec, the code of the mean of the
+    /// lifted codes ([`Codec::lower`]), else rounded half to even and
+    /// clamped. A vector is never missing, so a group whose leaves all have
+    /// weight 0 takes their unweighted mean.
+    fn reduce(&self, group: &[(u64, u32)], weights: Option<&[f64]>, acc: &mut [f64], out: &mut [u8]) {
+        let dim = self.dim;
+        let add = |acc: &mut [f64], i: usize, wi: f64| {
+            let row = &self.data[i * dim..(i + 1) * dim];
+            for (a, &b) in acc.iter_mut().zip(row) {
+                *a += wi * self.lut[b as usize];
+            }
+        };
+        acc.fill(0.0);
+        let mut wsum = 0.0;
+        for &(_, i) in group {
+            let wi = weight(weights, i as usize);
+            if wi > 0.0 {
+                add(acc, i as usize, wi);
+                wsum += wi;
+            }
+        }
+        if wsum == 0.0 {
+            for &(_, i) in group {
+                add(acc, i as usize, 1.0);
+                wsum += 1.0;
+            }
+        }
+        for (o, &a) in out.iter_mut().zip(acc.iter()) {
+            let m = a / wsum;
+            let q = match self.codec {
+                Some(c) => c.lower(m),
+                None => self.ty.quantise(m),
+            };
+            *o = match self.ty {
+                ColumnType::Int8 => q as i8 as u8,
+                _ => q as u8,
+            };
+        }
     }
 }
 
@@ -1032,6 +1165,285 @@ mod tests {
         assert!(try_build(VectorColumn::new("e", ColumnType::Int8, 4, ok(4)).with_sd(0.0), vec![]).is_err());
         let clash = Column::new("e", ColumnType::Float64, Reducer::Mean, vec![1.0; n]);
         assert!(try_build(VectorColumn::new("e", ColumnType::Int8, 4, ok(4)), vec![clash]).is_err());
+    }
+
+    /// The code of the weighted mean of the decoded codes of the leaves under
+    /// `parent` at `lod`, computed the long way in integers (codes and
+    /// weights are whole): the mean of `q |q|` is `s / ws`, and its code
+    /// rounds `sqrt(s / ws)` half away from zero, decided exactly by
+    /// comparing squares.
+    fn expected_aef_mean(cells: &[u64], codes: &[f64], w: &[f64], parent: u64, lod: i32) -> f64 {
+        let (mut s, mut ws) = (0i64, 0i64);
+        for i in 0..cells.len() {
+            if a5::cell_to_supercell(cells[i], lod).unwrap() == parent && w[i] > 0.0 {
+                let (q, wi) = (codes[i] as i64, w[i] as i64);
+                assert_eq!(wi as f64, w[i], "whole weights");
+                s += wi * q * q.abs();
+                ws += wi;
+            }
+        }
+        // the largest k with (k - 1/2)^2 <= |s| / ws, i.e. (2k - 1)^2 ws <= 4 |s|
+        let a = s.abs();
+        let mut k = 0i64;
+        while (2 * (k + 1) - 1).pow(2) * ws <= 4 * a {
+            k += 1;
+        }
+        (s.signum() * k).clamp(-128, 127) as f64
+    }
+
+    #[test]
+    fn an_exact_half_step_rounds_away_from_zero() {
+        let cells = grid(11, (20.0, 20.4), (-5.0, -4.6), 200);
+        // one level up, about four leaves a group
+        let lod = 10;
+        // codes 2, 2, 1, 0 in every group of four leaves: lifted, they average
+        // exactly 1.5^2, half way between codes 1 and 2; negated in odd groups
+        let pairs = supercell_rows(&cells, lod).unwrap();
+        let mut groups: std::collections::BTreeMap<u64, Vec<usize>> = Default::default();
+        for (p, i) in pairs {
+            groups.entry(p).or_default().push(i as usize);
+        }
+        let mut codes = vec![0.0; cells.len()];
+        let mut fours = Vec::new();
+        for (g, (&p, rows)) in groups.iter().enumerate() {
+            if rows.len() == 4 {
+                let sign = if g % 2 == 0 { 1.0 } else { -1.0 };
+                for (&i, q) in rows.iter().zip([2.0, 2.0, 1.0, 0.0]) {
+                    codes[i] = sign * q;
+                }
+                fours.push((p, sign));
+            }
+        }
+        assert!(fours.len() >= 2, "the grid has groups of four");
+        let p = build(
+            leaves_with(
+                cells,
+                vec![Column::new("q", ColumnType::Int8, Reducer::Mean, codes).with_codec(Codec::Aef)],
+            ),
+            &[lod],
+            &Cancel::new(),
+        )
+        .unwrap();
+        let l = &p.levels[0];
+        for (cell, sign) in fours {
+            let k = l.cells.binary_search(&cell).unwrap();
+            assert_eq!(l.values[0][k], 2.0 * sign);
+        }
+    }
+
+    #[test]
+    fn a_codec_mean_is_the_code_of_the_mean_of_the_decoded_leaves() {
+        let cells = grid(11, (20.0, 20.4), (-5.0, -4.6), 200);
+        let n = cells.len();
+        let (_, cols) = vector_leaves(&cells);
+        let codes = cols[1].clone();
+        let w: Vec<f64> = (0..n).map(|i| 1.0 + (i % 5) as f64).collect();
+        let leaves = Leaves {
+            cells: cells.clone(),
+            columns: vec![
+                Column::new("aef", ColumnType::Int8, Reducer::Mean, codes.clone()).with_codec(Codec::Aef),
+                Column::new("raw", ColumnType::Int8, Reducer::Mean, codes.clone()),
+            ],
+            weights: Some(w.clone()),
+            ..Default::default()
+        };
+        let p = build(leaves, &[7, 9], &Cancel::new()).unwrap();
+        assert_eq!(p.columns[0].codec, Some(Codec::Aef));
+        assert_eq!(p.columns[1].codec, None);
+        let mut differs = 0;
+        for level in &p.levels[..2] {
+            for (k, &c) in level.cells.iter().enumerate() {
+                assert_eq!(level.values[0][k], expected_aef_mean(&cells, &codes, &w, c, level.lod));
+                differs += usize::from(level.values[0][k] != level.values[1][k]);
+            }
+        }
+        // the mean of the codes is not the code of the mean
+        assert!(differs > 0);
+        // the leaves keep their codes
+        assert_eq!(p.levels[2].values[0], codes);
+    }
+
+    #[test]
+    fn a_mean_vector_is_its_elements_means() {
+        let cells = grid(11, (20.0, 20.4), (-5.0, -4.6), 200);
+        let n = cells.len();
+        let (bytes, cols) = vector_leaves(&cells);
+        let w: Vec<f64> = (0..n).map(|i| (i % 4) as f64).collect();
+        for codec in [None, Some(Codec::Aef)] {
+            let mut v = VectorColumn::new("e", ColumnType::Int8, 4, bytes.clone()).with_reducer(Reducer::Mean);
+            if let Some(c) = codec {
+                v = v.with_codec(c);
+            }
+            let as_vector = build(
+                Leaves {
+                    cells: cells.clone(),
+                    vectors: vec![v],
+                    weights: Some(w.clone()),
+                    ..Default::default()
+                },
+                &[6, 8, 10],
+                &Cancel::new(),
+            )
+            .unwrap();
+            let columns = cols
+                .iter()
+                .enumerate()
+                .map(|(e, x)| {
+                    let c = Column::new(format!("e{e}"), ColumnType::Int8, Reducer::Mean, x.clone());
+                    match codec {
+                        Some(k) => c.with_codec(k),
+                        None => c,
+                    }
+                })
+                .collect();
+            let as_columns = build(
+                Leaves {
+                    cells: cells.clone(),
+                    columns,
+                    weights: Some(w.clone()),
+                    ..Default::default()
+                },
+                &[6, 8, 10],
+                &Cancel::new(),
+            )
+            .unwrap();
+            let spec = &as_vector.vectors[0];
+            assert_eq!((spec.reducer, spec.codec, spec.sd), (Reducer::Mean, codec, None));
+            for (a, b) in as_vector.levels.iter().zip(&as_columns.levels) {
+                assert_eq!(a.cells, b.cells);
+                for i in 0..a.len() {
+                    for e in 0..4 {
+                        // a cell whose leaves all weigh 0 is missing as a
+                        // scalar; a vector takes the unweighted mean
+                        if !b.values[e][i].is_nan() {
+                            assert_eq!(a.vectors[0][i * 4 + e] as i8 as f64, b.values[e][i], "{codec:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_vector_whose_leaves_all_weigh_nothing_takes_their_plain_mean() {
+        let cells = grid(9, (0.0, 0.5), (0.0, 0.5), 60);
+        let n = cells.len();
+        let (bytes, cols) = vector_leaves(&cells);
+        let mk = |w: Option<Vec<f64>>| {
+            build(
+                Leaves {
+                    cells: cells.clone(),
+                    vectors: vec![VectorColumn::new("e", ColumnType::Int8, 4, bytes.clone())
+                        .with_reducer(Reducer::Mean)
+                        .with_codec(Codec::Aef)],
+                    weights: w,
+                    ..Default::default()
+                },
+                &[5],
+                &Cancel::new(),
+            )
+            .unwrap()
+        };
+        assert_eq!(mk(Some(vec![0.0; n])), mk(None));
+        let l = &mk(None).levels[0];
+        let ones = vec![1.0; n];
+        for (k, &c) in l.cells.iter().enumerate() {
+            for (e, col) in cols.iter().enumerate() {
+                assert_eq!(
+                    l.vectors[0][k * 4 + e] as i8 as f64,
+                    expected_aef_mean(&cells, col, &ones, c, 5)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_mean_vector_leaves_the_representatives_alone() {
+        let cells = grid(11, (20.0, 20.4), (-5.0, -4.6), 200);
+        let n = cells.len();
+        let (bytes, _) = vector_leaves(&cells);
+        let r: Vec<f64> = (0..n).map(|i| ((i * 37) % 256) as f64).collect();
+        let mk = |with_mean: bool| {
+            let mut vectors = vec![VectorColumn::new("e", ColumnType::Int8, 4, bytes.clone())];
+            if with_mean {
+                vectors.push(
+                    VectorColumn::new("m", ColumnType::Int8, 4, bytes.iter().rev().cloned().collect())
+                        .with_reducer(Reducer::Mean)
+                        .with_codec(Codec::Aef),
+                );
+            }
+            build(
+                Leaves {
+                    cells: cells.clone(),
+                    columns: vec![Column::new("r", ColumnType::UInt8, Reducer::RepChild, r.clone())],
+                    vectors,
+                    ..Default::default()
+                },
+                &[7, 9],
+                &Cancel::new(),
+            )
+            .unwrap()
+        };
+        let (with, without) = (mk(true), mk(false));
+        assert_eq!(with.vectors[0].sd, without.vectors[0].sd);
+        assert_eq!(with.vectors[1].sd, None);
+        for (a, b) in with.levels.iter().zip(&without.levels) {
+            assert_eq!(a.values, b.values);
+            assert_eq!(a.vectors[0], b.vectors[0]);
+        }
+    }
+
+    #[test]
+    fn codecs_and_vector_reducers_are_checked() {
+        let cells = grid(8, (0.0, 1.0), (0.0, 1.0), 30);
+        let n = cells.len();
+        let try_build = |cols: Vec<Column>, vecs: Vec<VectorColumn>| {
+            build(
+                Leaves {
+                    cells: cells.clone(),
+                    columns: cols,
+                    vectors: vecs,
+                    ..Default::default()
+                },
+                &[3],
+                &Cancel::new(),
+            )
+        };
+        let col = |ty, r| Column::new("v", ty, r, vec![1.0; n]);
+        let vec = || VectorColumn::new("e", ColumnType::Int8, 4, vec![0u8; n * 4]);
+        assert!(try_build(
+            vec![col(ColumnType::Int8, Reducer::Mean).with_codec(Codec::Aef)],
+            vec![]
+        )
+        .is_ok());
+        assert!(try_build(
+            vec![col(ColumnType::Int16, Reducer::Mean).with_codec(Codec::Aef)],
+            vec![]
+        )
+        .is_err());
+        assert!(try_build(
+            vec![col(ColumnType::Float64, Reducer::Mean).with_codec(Codec::Aef)],
+            vec![]
+        )
+        .is_err());
+        for r in [
+            Reducer::Sum,
+            Reducer::Min,
+            Reducer::Max,
+            Reducer::Mode,
+            Reducer::RepChild,
+        ] {
+            assert!(try_build(vec![col(ColumnType::Int8, r).with_codec(Codec::Aef)], vec![]).is_err());
+        }
+        assert!(try_build(vec![], vec![vec().with_reducer(Reducer::Mean)]).is_ok());
+        assert!(try_build(vec![], vec![vec().with_reducer(Reducer::Mean).with_codec(Codec::Aef)]).is_ok());
+        for r in [Reducer::Sum, Reducer::Min, Reducer::Max, Reducer::Mode] {
+            assert!(try_build(vec![], vec![vec().with_reducer(r)]).is_err());
+        }
+        assert!(try_build(vec![], vec![vec().with_codec(Codec::Aef)]).is_err());
+        assert!(try_build(vec![], vec![vec().with_reducer(Reducer::Mean).with_sd(2.0)]).is_err());
+        let uint = VectorColumn::new("e", ColumnType::UInt8, 4, vec![0u8; n * 4]);
+        assert!(try_build(vec![], vec![uint.with_reducer(Reducer::Mean).with_codec(Codec::Aef)]).is_err());
     }
 
     #[test]
