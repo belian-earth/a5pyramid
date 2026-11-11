@@ -6,7 +6,9 @@
   code of the mean rather than the mean of the codes, which differ for a
   nonlinear code. `"aef"` is the AlphaEarth Foundations int8 code, encoded
   as the a5embeddings store encodes its cell means (rounded half away from
-  zero, clamped to -128 to 127). The index records each column's `codec`
+  zero, clamped to -128 to 127), taking the mean on `x * |x|` so that whole
+  codes and weights sum exactly and a mean half way between two codes
+  rounds away from zero in any order. The index records each column's `codec`
   (`columns$codec` in the info functions), an optional field added without
   a format version change. In the crate: `Codec`, `ColumnSpec::codec`,
   `VectorSpec::codec`.

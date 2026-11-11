@@ -225,11 +225,38 @@ impl Codec {
         }
     }
 
-    /// The value of every byte, for a vector column of `ty` elements.
+    /// A code's value up to a positive scale that the codec divides out
+    /// again ([`Codec::lower`]): the mean is taken in this space. For `Aef`
+    /// it is `x * |x|`, the value times 127.5², an integer for an integer
+    /// code, so sums over integer weights are exact (below 2^53) and the
+    /// code of a mean is the same whatever order its leaves are summed in.
+    #[inline]
+    pub(crate) fn lift(self, code: f64) -> f64 {
+        match self {
+            Self::Aef => code * code.abs(),
+        }
+    }
+
+    /// The code of a mean of lifted values ([`Codec::lift`]):
+    /// `encode(mean / 127.5²)` for `Aef`, computed as
+    /// `round(sign(m) * sqrt(|m|))`. A mean that lies exactly half way
+    /// between two codes, as integer codes and weights can give, rounds
+    /// away from zero. Missing means (NaN) stay missing.
+    #[inline]
+    pub(crate) fn lower(self, mean: f64) -> f64 {
+        if mean.is_nan() {
+            return mean;
+        }
+        match self {
+            Self::Aef => (mean.signum() * mean.abs().sqrt()).round().clamp(-128.0, 127.0),
+        }
+    }
+
+    /// The lifted value of every byte, for a vector column of `ty` elements.
     pub(crate) fn byte_values(self, ty: ColumnType) -> [f64; 256] {
         let mut lut = [0.0; 256];
         for (b, v) in lut.iter_mut().enumerate() {
-            *v = self.decode(ty.byte_value(b as u8));
+            *v = self.lift(ty.byte_value(b as u8));
         }
         lut
     }
@@ -414,7 +441,36 @@ mod tests {
         assert!(aef.decode(f64::NAN).is_nan());
         assert_eq!(aef.code_type(), ColumnType::Int8);
         let lut = aef.byte_values(ColumnType::Int8);
-        assert_eq!(lut[0x80], aef.decode(-128.0));
-        assert_eq!(lut[0x7f], aef.decode(127.0));
+        assert_eq!(lut[0x80], -16384.0);
+        assert_eq!(lut[0x7f], 16129.0);
+    }
+
+    #[test]
+    fn aef_means_in_the_lifted_space_are_the_encoded_means_and_ties_round_away() {
+        let aef = Codec::Aef;
+        // lifting scales the value by 127.5^2, which lowering divides out
+        for q in -128..=127 {
+            let q = q as f64;
+            assert_eq!(aef.lift(q), q * q.abs());
+            assert_eq!(aef.lower(aef.lift(q)), q);
+            assert!((aef.lift(q) / (127.5 * 127.5) - aef.decode(q)).abs() < 1e-15);
+        }
+        for k in -2000..=2000 {
+            let m = k as f64 * 8.21;
+            // up to a code where the two forms sit within rounding of a half step
+            let x = m.signum() * m.abs().sqrt();
+            if (x.abs().fract() - 0.5).abs() > 1e-9 {
+                assert_eq!(aef.lower(m), aef.encode(m / (127.5 * 127.5)), "mean {m}");
+            }
+        }
+        // codes 2, 2, 1 and 0 average 9 / 4 = 1.5^2 when lifted: exactly half
+        // way between codes 1 and 2, so 2 (and -2 for their negatives)
+        let mean = [2.0, 2.0, 1.0, 0.0].iter().map(|&q| aef.lift(q)).sum::<f64>() / 4.0;
+        assert_eq!(mean, 2.25);
+        assert_eq!(aef.lower(mean), 2.0);
+        assert_eq!(aef.lower(-mean), -2.0);
+        assert_eq!(aef.lower(1e9), 127.0);
+        assert_eq!(aef.lower(-1e9), -128.0);
+        assert!(aef.lower(f64::NAN).is_nan());
     }
 }

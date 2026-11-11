@@ -644,7 +644,8 @@ fn weight(weights: Option<&[f64]>, i: usize) -> f64 {
 }
 
 /// Mean, sum, min or max of the group's non-missing values. A mean with a
-/// codec is the code of the mean of the decoded values.
+/// codec is the code of the mean of the decoded values, taken on the lifted
+/// codes ([`Codec::lift`]) so that integer codes and weights sum exactly.
 fn reduce(reducer: Reducer, group: &[(u64, u32)], v: &[f64], weights: Option<&[f64]>, codec: Option<Codec>) -> f64 {
     let present = group.iter().map(|&(_, i)| i as usize).filter(|&i| !v[i].is_nan());
     match reducer {
@@ -653,12 +654,12 @@ fn reduce(reducer: Reducer, group: &[(u64, u32)], v: &[f64], weights: Option<&[f
             for i in present {
                 let wi = weight(weights, i);
                 if wi > 0.0 {
-                    s += wi * codec.map_or(v[i], |c| c.decode(v[i]));
+                    s += wi * codec.map_or(v[i], |c| c.lift(v[i]));
                     w += wi;
                 }
             }
             if w > 0.0 {
-                codec.map_or(s / w, |c| c.encode(s / w))
+                codec.map_or(s / w, |c| c.lower(s / w))
             } else {
                 f64::NAN
             }
@@ -676,8 +677,8 @@ fn reduce(reducer: Reducer, group: &[(u64, u32)], v: &[f64], weights: Option<&[f
     }
 }
 
-/// The value of every byte of a vector column of `ty` elements: decoded
-/// with a codec, else the element itself.
+/// The value of every byte of a vector column of `ty` elements: lifted
+/// with a codec ([`Codec::lift`]), else the element itself.
 fn value_lut(ty: ColumnType, codec: Option<Codec>) -> [f64; 256] {
     match codec {
         Some(c) => c.byte_values(ty),
@@ -703,8 +704,8 @@ struct VecMean<'a> {
 
 impl VecMean<'_> {
     /// The group's (weighted) mean vector into `out`, element by element,
-    /// stored as the column's type: encoded with a codec, else rounded half
-    /// to even and clamped. A vector is never missing, so a group whose
+    /// stored as the column's type: with a codec, the code of the mean of the
+    /// lifted codes ([`Codec::lower`]), else rounded half to even and clamped. A vector is never missing, so a group whose
     /// leaves all have weight 0 takes their unweighted mean.
     fn reduce(&self, group: &[(u64, u32)], weights: Option<&[f64]>, acc: &mut [f64], out: &mut [u8]) {
         let dim = self.dim;
@@ -732,7 +733,7 @@ impl VecMean<'_> {
         for (o, &a) in out.iter_mut().zip(acc.iter()) {
             let m = a / wsum;
             let q = match self.codec {
-                Some(c) => c.encode(m),
+                Some(c) => c.lower(m),
                 None => self.ty.quantise(m),
             };
             *o = match self.ty {
@@ -1166,22 +1167,67 @@ mod tests {
     }
 
     /// The code of the weighted mean of the decoded codes of the leaves under
-    /// `parent` at `lod`, computed the long way, with the leaves in cell
-    /// order (the order the engine sums them in).
+    /// `parent` at `lod`, computed the long way in integers (codes and
+    /// weights are whole): the mean of `q |q|` is `s / ws`, and its code
+    /// rounds `sqrt(s / ws)` half away from zero, decided exactly by
+    /// comparing squares.
     fn expected_aef_mean(cells: &[u64], codes: &[f64], w: &[f64], parent: u64, lod: i32) -> f64 {
-        let aef = Codec::Aef;
-        let mut idx: Vec<usize> = (0..cells.len())
-            .filter(|&i| a5::cell_to_supercell(cells[i], lod).unwrap() == parent)
-            .collect();
-        idx.sort_by_key(|&i| cells[i]);
-        let (mut s, mut ws) = (0.0, 0.0);
-        for i in idx {
-            if w[i] > 0.0 {
-                s += w[i] * aef.decode(codes[i]);
-                ws += w[i];
+        let (mut s, mut ws) = (0i64, 0i64);
+        for i in 0..cells.len() {
+            if a5::cell_to_supercell(cells[i], lod).unwrap() == parent && w[i] > 0.0 {
+                let (q, wi) = (codes[i] as i64, w[i] as i64);
+                assert_eq!(wi as f64, w[i], "whole weights");
+                s += wi * q * q.abs();
+                ws += wi;
             }
         }
-        aef.encode(s / ws)
+        // the largest k with (k - 1/2)^2 <= |s| / ws, i.e. (2k - 1)^2 ws <= 4 |s|
+        let a = s.abs();
+        let mut k = 0i64;
+        while (2 * (k + 1) - 1).pow(2) * ws <= 4 * a {
+            k += 1;
+        }
+        (s.signum() * k).clamp(-128, 127) as f64
+    }
+
+    #[test]
+    fn an_exact_half_step_rounds_away_from_zero() {
+        let cells = grid(11, (20.0, 20.4), (-5.0, -4.6), 200);
+        // one level up, about four leaves a group
+        let lod = 10;
+        // codes 2, 2, 1, 0 in every group of four leaves: lifted, they average
+        // exactly 1.5^2, half way between codes 1 and 2; negated in odd groups
+        let pairs = supercell_rows(&cells, lod).unwrap();
+        let mut groups: std::collections::BTreeMap<u64, Vec<usize>> = Default::default();
+        for (p, i) in pairs {
+            groups.entry(p).or_default().push(i as usize);
+        }
+        let mut codes = vec![0.0; cells.len()];
+        let mut fours = Vec::new();
+        for (g, (&p, rows)) in groups.iter().enumerate() {
+            if rows.len() == 4 {
+                let sign = if g % 2 == 0 { 1.0 } else { -1.0 };
+                for (&i, q) in rows.iter().zip([2.0, 2.0, 1.0, 0.0]) {
+                    codes[i] = sign * q;
+                }
+                fours.push((p, sign));
+            }
+        }
+        assert!(fours.len() >= 2, "the grid has groups of four");
+        let p = build(
+            leaves_with(
+                cells,
+                vec![Column::new("q", ColumnType::Int8, Reducer::Mean, codes).with_codec(Codec::Aef)],
+            ),
+            &[lod],
+            &Cancel::new(),
+        )
+        .unwrap();
+        let l = &p.levels[0];
+        for (cell, sign) in fours {
+            let k = l.cells.binary_search(&cell).unwrap();
+            assert_eq!(l.values[0][k], 2.0 * sign);
+        }
     }
 
     #[test]

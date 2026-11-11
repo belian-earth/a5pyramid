@@ -89,7 +89,10 @@
 #'   means. A coarse cell holds the code the store would write for the mean
 #'   of its leaves' decoded embeddings; with each leaf's pixel count as
 #'   `weights`, for the mean of their pixels, up to the leaves' own
-#'   rounding.
+#'   rounding. The mean is taken on `x * abs(x)`, the value times 127.5^2,
+#'   which is exact for whole codes and weights, so a mean exactly half way
+#'   between two codes rounds away from zero whatever the order of the
+#'   sum.
 #'
 #' A codec applies to `"mean"` columns, scalar or vector, stored as its code
 #' type.

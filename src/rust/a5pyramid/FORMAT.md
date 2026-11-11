@@ -235,6 +235,18 @@ of the a5embeddings store's cell means, so a coarse cell of a pyramid built
 from the store's leaves holds the code the store would write for the mean of
 those leaves' decoded embeddings.
 
+A writer takes an `aef` mean as the mean of `x * |x|` (the value times
+127.5²) and its code as `round(sign(m) * sqrt(|m|))`, the same arithmetic
+in a form that is exact for whole codes and weights. Such means can lie
+exactly half way between two codes (codes 2, 2, 1 and 0 average 1.5² when
+lifted), and they round away from zero whatever the order of the sum; a mean
+of decoded floating-point values would round them either way.
+
+Stored codes are not values: a reader that combines stored cells, such as
+partial cells of separate builds that share a coarse cell, decodes them with
+the codec, takes their mean weighted by `ncell` (or by the summed weights)
+and encodes it, rather than averaging the codes.
+
 ## Encodings and compression
 
 - `cell` and `ncell` are `DELTA_BINARY_PACKED`: a tile's ids are sorted and

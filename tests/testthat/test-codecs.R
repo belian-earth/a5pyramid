@@ -12,12 +12,19 @@ aef_encode <- function(v) {
 }
 
 # The code of each cell's weighted mean of decoded codes at `lod`, by hex
-# cell, the long way.
+# cell, the long way and exactly: with whole codes and weights the mean of
+# q |q| is num / den, and its code is the largest k with
+# (k - 1/2)^2 <= |num| / den, ties away from zero, decided in integers.
 aef_means <- function(cells, codes, w, lod) {
+  stopifnot(all(w == round(w)))
   g <- groups_at(cells, lod)
-  num <- rowsum(w * aef_decode(codes), g)
-  den <- rowsum(w, g)
-  stats::setNames(aef_encode(num[, 1] / den[, 1]), rownames(num))
+  num <- rowsum(w * codes * abs(codes), g)[, 1]
+  den <- rowsum(w, g)[, 1]
+  a <- abs(num)
+  k <- floor(sqrt(a / den) + 0.5)
+  k <- k - ((2 * k - 1)^2 * den > 4 * a & k > 0)
+  k <- k + ((2 * k + 1)^2 * den <= 4 * a)
+  stats::setNames(pmin(127, pmax(-128, sign(num) * k)), names(num))
 }
 
 codec_leaves <- function(seed = 1L, dim = 6L) {
@@ -28,6 +35,16 @@ codec_leaves <- function(seed = 1L, dim = 6L) {
   x$q <- x$emb[, 1]
   x
 }
+
+test_that("the exact means are the store's encoder of the decoded means, but at ties", {
+  x <- codec_leaves()
+  for (lod in c(11L, 13L)) {
+    g <- groups_at(x$cell, lod)
+    float <- rowsum(x$count * aef_decode(x$q), g)[, 1] / rowsum(x$count, g)[, 1]
+    exact <- aef_means(x$cell, x$q, x$count, lod)
+    expect_identical(unname(aef_encode(float[names(exact)])), unname(exact))
+  }
+})
 
 test_that("a codec mean is the code of the mean of the decoded leaves", {
   x <- codec_leaves()
