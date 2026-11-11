@@ -705,8 +705,9 @@ struct VecMean<'a> {
 impl VecMean<'_> {
     /// The group's (weighted) mean vector into `out`, element by element,
     /// stored as the column's type: with a codec, the code of the mean of the
-    /// lifted codes ([`Codec::lower`]), else rounded half to even and clamped. A vector is never missing, so a group whose
-    /// leaves all have weight 0 takes their unweighted mean.
+    /// lifted codes ([`Codec::lower`]), else rounded half to even and
+    /// clamped. A vector is never missing, so a group whose leaves all have
+    /// weight 0 takes their unweighted mean.
     fn reduce(&self, group: &[(u64, u32)], weights: Option<&[f64]>, acc: &mut [f64], out: &mut [u8]) {
         let dim = self.dim;
         let add = |acc: &mut [f64], i: usize, wi: f64| {
