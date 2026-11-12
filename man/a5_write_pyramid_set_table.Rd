@@ -64,7 +64,7 @@ shards <- data.frame(
   tier = 0L, path = "leaves.parquet", rows = sum(info$tiles$rows),
   tiles = nrow(info$tiles), bytes = info$bytes, footer_bytes = info$footer_bytes,
   xmin = info$bbox[["xmin"]], ymin = info$bbox[["ymin"]],
-  xmax = info$bbox[["xmax"]], ymax = info$bbox[["ymax"]], build = "b1"
+  xmax = info$bbox[["xmax"]], ymax = info$bbox[["ymax"]]
 )
 shards$cell <- key
 tiers <- data.frame(lod_min = 15, lod_max = 15, shard_resolution = 9)

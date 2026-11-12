@@ -51,12 +51,13 @@ test_that("list vectors write and read back as fixed binary ones do", {
   expect_identical(a5_pyramid_info(a)$columns$storage, "fixed_binary")
   expect_error(a5_write_pyramid(x, b, emb, n_pixels, storage = c(n_pixels = "list")), class = "a5pyramid_error_input")
   expect_error(a5_write_pyramid(x, b, emb, storage = c(emb = "tuple")), class = "a5pyramid_error_input")
-  skip_if_not_installed("duckdb")
-  con <- DBI::dbConnect(duckdb::duckdb())
-  on.exit(DBI::dbDisconnect(con, shutdown = TRUE))
-  got <- DBI::dbGetQuery(con, sprintf("SELECT any_value(typeof(emb)) AS t, min(len(emb)) AS lo, max(len(emb)) AS hi FROM read_parquet('%s')", b))
-  expect_identical(got$t, "TINYINT[]")
-  expect_identical(c(got$lo, got$hi), c(16, 16))
+  # a Parquet list of int8, as engines read an array column (DuckDB's TINYINT[])
+  skip_if_not_installed("arrow")
+  type <- arrow::ParquetFileReader$create(b)$GetSchema()$emb$type
+  expect_true(inherits(type, "ListType"))
+  expect_identical(type$value_type$ToString(), "int8")
+  lens <- lengths(as.list(arrow::read_parquet(b, col_select = "emb")$emb))
+  expect_true(all(lens == 16L))
 })
 
 test_that("Arrow list columns, as DuckDB returns TINYINT[], are vectors", {
