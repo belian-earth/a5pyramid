@@ -40,6 +40,7 @@ mod cancel;
 mod column;
 mod error;
 mod meta;
+mod partials;
 mod read;
 mod set;
 mod set_table;
@@ -59,6 +60,10 @@ pub use error::{Error, Result};
 pub use meta::{
     ColumnMeta, LevelMeta, PyramidMeta, ShardMeta, TileLocation, WeightsMeta, A5_INDEX, A5_INDEX_KEY, FORMAT_VERSION,
     META_KEY,
+};
+pub use partials::{
+    merge_partials, partials, partials_meta, PartialsMerge, PartialsMeta, PartialsVector, PartialsWeights, KEY_COLUMN, PARTIALS_META_KEY,
+    PARTIALS_VERSION,
 };
 pub use read::PyramidFile;
 pub use set::{

@@ -320,7 +320,7 @@ fn check_columns(columns: &[Column], n: usize) -> Result<()> {
     Ok(())
 }
 
-fn check_vectors(vectors: &[VectorColumn], columns: &[Column], n: usize) -> Result<()> {
+pub(crate) fn check_vectors(vectors: &[VectorColumn], columns: &[Column], n: usize) -> Result<()> {
     let mut seen: HashSet<&str> = columns.iter().map(|c| c.spec.name.as_str()).collect();
     for v in vectors {
         let name = &v.spec.name;
@@ -397,7 +397,7 @@ fn check_codec(name: &str, codec: Option<Codec>, reducer: Reducer, ty: ColumnTyp
     Ok(())
 }
 
-fn check_weights(weights: Option<Vec<f64>>, n: usize) -> Result<Option<Vec<f64>>> {
+pub(crate) fn check_weights(weights: Option<Vec<f64>>, n: usize) -> Result<Option<Vec<f64>>> {
     let Some(mut w) = weights else { return Ok(None) };
     if w.len() != n {
         return Err(invalid(format!("{} weights for {n} cells", w.len())));
@@ -419,7 +419,7 @@ fn check_weights(weights: Option<Vec<f64>>, n: usize) -> Result<Option<Vec<f64>>
 
 /// The cells' common resolution, after checking that each is a cell (not
 /// the world cell or a compaction marker).
-fn check_cells(cells: &[u64]) -> Result<i32> {
+pub(crate) fn check_cells(cells: &[u64]) -> Result<i32> {
     let bad = cells
         .par_iter()
         .position_first(|&c| c == a5::WORLD_CELL || a5::is_compaction_marker(c) || !a5::is_valid_cell(c));
@@ -441,7 +441,7 @@ fn check_cells(cells: &[u64]) -> Result<i32> {
     Ok(res)
 }
 
-fn check_lods(lods: &[i32], data_resolution: i32) -> Result<Vec<i32>> {
+pub(crate) fn check_lods(lods: &[i32], data_resolution: i32) -> Result<Vec<i32>> {
     let mut seen = HashSet::new();
     for &l in lods {
         if l < 0 || l >= data_resolution {
@@ -466,7 +466,7 @@ type LeafParts = (Vec<u64>, Vec<Column>, Vec<VectorColumn>, Option<Vec<f64>>);
 /// (cell, row) pairs and 4 for the row order; the cells are rewritten in
 /// place and the columns gathered one at a time, so at most one column is
 /// held twice (a vector column too: input in cell order avoids the copy).
-fn sort_leaves(
+pub(crate) fn sort_leaves(
     mut cells: Vec<u64>,
     columns: Vec<Column>,
     vectors: Vec<VectorColumn>,
@@ -822,7 +822,7 @@ fn reduce(reducer: Reducer, group: &[(u64, u32)], v: &[f64], weights: Option<&[f
 
 /// The value of every byte of a vector column of `ty` elements: lifted
 /// with a codec ([`Codec::lift`]), else the element itself.
-fn value_lut(ty: ColumnType, codec: Option<Codec>) -> [f64; 256] {
+pub(crate) fn value_lut(ty: ColumnType, codec: Option<Codec>) -> [f64; 256] {
     match codec {
         Some(c) => c.byte_values(ty),
         None => {

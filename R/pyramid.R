@@ -419,7 +419,7 @@ A5_INDEX <- "1.0"
 #' @noRd
 pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
                           rep_sd = NULL, codecs = NULL, storage = NULL, weights_type = NULL,
-                          ncell = NULL, call = rlang::caller_env()) {
+                          ncell = NULL, vector_reducer = "rep_child", call = rlang::caller_env()) {
   check_not_covering(x, call)
   arrow_src <- NULL
   if (is_arrow_data(x)) {
@@ -457,7 +457,8 @@ pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
   # a stored weights column and ncell are not value columns
   names <- setdiff(names, c(if (nzchar(weights_type)) weights, ncell))
   dims <- vector_dims(df, names)
-  reducers_v <- resolve_reducers(names, aggregate, reducers, weights, call, dims = dims)
+  reducers_v <- resolve_reducers(names, aggregate, reducers, weights, call, dims = dims,
+                                 vector_reducer = vector_reducer)
   types_v <- resolve_types(df, names, types, call, arrow_types = arrow_src$types, dims = dims,
                            arrow_vectors = arrow_src$vectors)
   sd_v <- resolve_sd(rep_sd, names, reducers_v, call)
@@ -753,13 +754,14 @@ check_named_choice <- function(x, arg, names, choices, call) {
   x
 }
 
-resolve_reducers <- function(names, aggregate, reducers, weights, call, dims = integer()) {
+resolve_reducers <- function(names, aggregate, reducers, weights, call, dims = integer(),
+                             vector_reducer = "rep_child") {
   given <- check_named_choice(reducers, "reducers", names, PYRAMID_REDUCERS, call)
   out <- rep(aggregate, length(names))
   names(out) <- names
   if (!is.null(weights) && weights %in% names) out[[weights]] <- "sum"
-  # vector columns are reduced by rep_child whatever the aggregate, or by
-  # mean where `reducers` says so
+  # vector columns are reduced by rep_child whatever the aggregate (by mean
+  # for partials), or as `reducers` says
   vec <- names[dims[names] > 0L]
   bad <- vec[vec %in% names(given) & !given[vec] %in% c("rep_child", "mean")]
   if (length(bad) > 0L) {
@@ -768,7 +770,7 @@ resolve_reducers <- function(names, aggregate, reducers, weights, call, dims = i
       "i" = "A coarse cell takes the vector of one representative leaf, or the mean of its leaves' vectors."
     ), call = call)
   }
-  out[vec] <- "rep_child"
+  out[vec] <- vector_reducer
   out[names(given)] <- given
   out
 }

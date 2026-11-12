@@ -1,5 +1,21 @@
 # a5pyramid (development version)
 
+* **Partial rows** for pyramids of a region built in parts (a store's
+  partitions, each built alone), whose coarse levels span the parts:
+  * `a5_pyramid_partials()` reduces leaves to exact sums at coarse LODs: for
+    each cell, its leaves, their summed weights, and each mean vector's
+    weighted sums of lifted values (the codec's lift, `code * |code|` for
+    `"aef"`), keyed by the cell's supercell at a key resolution. An Arrow
+    table whose schema metadata (`"a5pyramid_partials"`) records how to
+    encode it; Parquet keeps it.
+  * `a5_pyramid_merge_partials()` adds the rows of every part, cell by
+    cell, optionally for some keys only (one shard), reading Arrow tables,
+    readers or datasets batch by batch, and encodes each mean as
+    `a5_pyramid()` does. The result is the rows `a5_pyramid()` gives for all
+    the leaves at once, ready for `a5_write_pyramid_level()`.
+  * With integer weights the sums are exact, so the merged codes do not
+    depend on how the leaves were split. Only mean vectors merge; every
+    weight must be above zero.
 * a5R comes from CRAN: `Remotes` no longer names `belian-earth/a5R`, now that
   a5R 1.0.0 is released. An unpinned remote is a request for a5R's default
   branch, and pak refused to install a5pyramid beside any other pinned a5R

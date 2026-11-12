@@ -5,14 +5,15 @@ use arrow_array::cast::AsArray;
 use arrow_array::types::{
     Float32Type, Float64Type, Int16Type, Int32Type, Int8Type, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
-use arrow_array::{Array, RecordBatch, RecordBatchReader};
+use arrow_array::{Array, RecordBatch, RecordBatchIterator, RecordBatchReader};
 use arrow_schema::DataType;
 use extendr_api::prelude::*;
 
 use a5pyramid::{
-    build, default_tiers, write_parquet, write_set, write_set_table, Bbox, Codec, Column, ColumnSpec, ColumnType,
+    build, default_tiers, partials, write_parquet, write_set, write_set_table, Bbox, Codec, Column, ColumnSpec, ColumnType,
     Compression, Leaves, ParquetOptions, Pyramid, PyramidFile, Reducer, SetIndexFormat, SetMeta, SetOptions,
     ShardEntry, ShardMeta, Tier, TileOptions, TiledPyramid, VectorColumn, VectorStorage, WeightsSpec,
+    PartialsMerge,
 };
 use arrow_array::ffi_stream::{FFI_ArrowArrayStream, RecordBatchStreamReader};
 
@@ -1157,6 +1158,62 @@ fn a5pyramid_arrow_rs(
     Ok(list!(holder = holder, address = address).into())
 }
 
+/// One record batch as an Arrow C stream: `holder` (an external pointer
+/// owning the stream until it is imported) and `address`.
+fn batch_stream(batch: RecordBatch) -> Robj {
+    let schema = batch.schema();
+    let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
+    let slot = StreamSlot(Box::new(FFI_ArrowArrayStream::new(Box::new(reader))));
+    let address = (slot.0.as_ref() as *const FFI_ArrowArrayStream as usize).to_string();
+    let holder: Robj = ExternalPtr::new(slot).into();
+    list!(holder = holder, address = address).into()
+}
+
+/// The partial rows of the leaves in a handle at `lods`, keyed at
+/// `key_resolutions`, as an Arrow C stream of one batch.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5pyramid_partials_rs(leaves: Robj, lods: Vec<i32>, key_resolutions: Vec<i32>, threads: i32) -> Result<Robj> {
+    let leaves = take_leaves(&leaves)?;
+    let batch = run(threads as usize, move |cancel| partials(leaves, &lods, &key_resolutions, cancel))?;
+    Ok(batch_stream(batch))
+}
+
+/// Merge the partial rows read from the Arrow C stream in `holder` (from
+/// `a5pyramid_stream_slot_rs()`, filled by arrow), keeping only the rows
+/// of `keys` (an a5_cell vector) unless it is NULL. Batches are read on R's
+/// main thread, one at a time, so only the rows kept are held; the sums and
+/// codes are computed on `threads` threads. An Arrow C stream of one batch.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5pyramid_merge_partials_rs(holder: Robj, keys: Robj, threads: i32) -> Result<Robj> {
+    let keys = if keys.is_null() {
+        None
+    } else {
+        let (ids, na) = cells_to_u64(&keys)?;
+        if na.iter().any(|&x| x) {
+            return Err(other("invalid input: `keys` must not hold NA cells"));
+        }
+        Some(ids.into_iter().collect())
+    };
+    let mut slot: ExternalPtr<StreamSlot> = (&holder).try_into()?;
+    let stream = std::mem::replace(slot.0.as_mut(), FFI_ArrowArrayStream::empty());
+    let reader = RecordBatchStreamReader::try_new(stream).map_err(|e| other(format!("arrow error: {e}")))?;
+    let schema = reader.schema();
+    let mut merge = PartialsMerge::new(&schema, keys).map_err(r_error)?;
+    for batch in reader {
+        if interrupt_pending() {
+            return Err(other("interrupted: stopped by the user"));
+        }
+        let batch = batch.map_err(|e| other(format!("arrow error: {e}")))?;
+        merge.push(&batch).map_err(r_error)?;
+    }
+    let batch = run(threads as usize, move |cancel| merge.finish(cancel))?;
+    Ok(batch_stream(batch))
+}
+
 /// The index and Parquet layout of a pyramid file.
 /// @noRd
 /// @keywords internal
@@ -1411,6 +1468,8 @@ extendr_module! {
     fn a5pyramid_build_rs;
     fn a5pyramid_write_rs;
     fn a5pyramid_arrow_rs;
+    fn a5pyramid_partials_rs;
+    fn a5pyramid_merge_partials_rs;
     fn a5pyramid_write_set_rs;
     fn a5pyramid_write_level_rs;
     fn a5pyramid_write_set_table_rs;
