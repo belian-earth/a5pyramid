@@ -33,21 +33,37 @@ A list of class `a5pyramid_info`:
 
 - `tile_size`: the most rows in a tile.
 
+- `row_group_size`: in a file whose row groups hold several tiles
+  (format version 4), the most rows in a row group; `NA` where each row
+  group is one tile. `row_groups`: the number of row groups.
+
+- `weights`: the weights column (a list of its `name` and `type`; format
+  version 4), or `NULL`.
+
+- `owner`: whether the file has an `owner` column, a shard whose rows
+  may be partial (format version 4; see
+  [`a5_write_pyramid_level()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid_level.md)).
+
 - `bbox`: `c(xmin, ymin, xmax, ymax)` of the leaves.
 
-- `columns`: a tibble of the value columns' `name`, `type`, `reducer`
-  and `sd`, the standard deviation that scaled a `"rep_child"` column (1
-  where the leaves' standard deviation is 0 or undefined; `NA` for other
-  reducers and older files), and `dim`, the elements per cell of a
-  vector column (`NA` for scalar columns).
+- `columns`: a tibble of the value columns' `name`, `type`, `reducer`,
+  `codec` (see
+  [`a5_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid.md);
+  `NA` for a column that stores its values) and `sd`, the standard
+  deviation that scaled a `"rep_child"` column (1 where the leaves'
+  standard deviation is 0 or undefined; `NA` for other reducers and
+  older files), `dim`, the elements per cell of a vector column (`NA`
+  for scalar columns), and `storage`, a vector column's storage
+  (`"fixed_binary"` or `"list"`).
 
 - `levels`: a tibble of each level's `lod`, `rows` and number of
   `tiles`.
 
-- `tiles`: a tibble with one row per tile, which is one row group of the
-  file: `tile` (its 0-based index, the row group's index as Parquet
-  readers count), `lod`, `rows`, `bytes` (compressed size, what a reader
-  fetches) and `xmin`, `ymin`, `xmax`, `ymax`.
+- `tiles`: a tibble with one row per tile: `tile` (its 0-based index),
+  `row_group` (the 0-based index of its row group, as Parquet readers
+  count), `lod`, `rows`, `bytes` (compressed size, what a reader
+  fetches: the row group, or the tile's data pages in a row group of
+  several tiles) and `xmin`, `ymin`, `xmax`, `ymax`.
 
 - `metadata`: the file's other key-value metadata, a named character
   vector.
@@ -81,7 +97,7 @@ a5_write_pyramid(data.frame(cell = cells, value = runif(length(cells))), path)
 
 info <- a5_pyramid_info(path)
 info
-#> ── a5pyramid file file29306d291993.parquet ─────────────────────────────────────
+#> ── a5pyramid file file2a23522eeb71.parquet ─────────────────────────────────────
 #> Size: 17.1 KB (footer 4.6 KB)
 #> A5 index: 1.0
 #> Leaves: resolution 15, 1,024 cells

@@ -64,18 +64,28 @@ the file) and <code>a5_index</code> (the A5 index version of its ids).</p></li>
 <li><p><code>data_resolution</code>: the leaves' resolution. <code>lods</code>: every level's
 LOD, ascending, the leaves last.</p></li>
 <li><p><code>tile_size</code>: the most rows in a tile.</p></li>
+<li><p><code>row_group_size</code>: in a file whose row groups hold several tiles
+(format version 4), the most rows in a row group; <code>NA</code> where each
+row group is one tile. <code>row_groups</code>: the number of row groups.</p></li>
+<li><p><code>weights</code>: the weights column (a list of its <code>name</code> and <code>type</code>;
+format version 4), or <code>NULL</code>.</p></li>
+<li><p><code>owner</code>: whether the file has an <code>owner</code> column, a shard whose rows
+may be partial (format version 4; see <code><a href="a5_write_pyramid_level.html">a5_write_pyramid_level()</a></code>).</p></li>
 <li><p><code>bbox</code>: <code>c(xmin, ymin, xmax, ymax)</code> of the leaves.</p></li>
 <li><p><code>columns</code>: a tibble of the value columns' <code>name</code>, <code>type</code>,
-<code>reducer</code> and <code>sd</code>, the standard deviation that scaled a
+<code>reducer</code>, <code>codec</code> (see <code><a href="a5_pyramid.html">a5_pyramid()</a></code>; <code>NA</code> for a column that
+stores its values) and <code>sd</code>, the standard deviation that scaled a
 <code>"rep_child"</code> column (1 where the leaves' standard deviation is 0 or
-undefined; <code>NA</code> for other reducers and older files), and <code>dim</code>, the
-elements per cell of a vector column (<code>NA</code> for scalar columns).</p></li>
+undefined; <code>NA</code> for other reducers and older files), <code>dim</code>, the
+elements per cell of a vector column (<code>NA</code> for scalar columns), and
+<code>storage</code>, a vector column's storage (<code>"fixed_binary"</code> or <code>"list"</code>).</p></li>
 <li><p><code>levels</code>: a tibble of each level's <code>lod</code>, <code>rows</code> and number of
 <code>tiles</code>.</p></li>
-<li><p><code>tiles</code>: a tibble with one row per tile, which is one row group of
-the file: <code>tile</code> (its 0-based index, the row group's index as Parquet
-readers count), <code>lod</code>, <code>rows</code>, <code>bytes</code> (compressed size, what a
-reader fetches) and <code>xmin</code>, <code>ymin</code>, <code>xmax</code>, <code>ymax</code>.</p></li>
+<li><p><code>tiles</code>: a tibble with one row per tile: <code>tile</code> (its 0-based index),
+<code>row_group</code> (the 0-based index of its row group, as Parquet readers
+count), <code>lod</code>, <code>rows</code>, <code>bytes</code> (compressed size, what a reader
+fetches: the row group, or the tile's data pages in a row group of
+several tiles) and <code>xmin</code>, <code>ymin</code>, <code>xmax</code>, <code>ymax</code>.</p></li>
 <li><p><code>metadata</code>: the file's other key-value metadata, a named character
 vector.</p></li>
 <li><p><code>shard</code>: for a shard of a pyramid set (format version 2, written by
@@ -103,7 +113,7 @@ itself stores such a box with <code>west &gt; east</code>, as GeoJSON does.</p>
 <span class="r-in"><span></span></span>
 <span class="r-in"><span><span class="va">info</span> <span class="op">&lt;-</span> <span class="fu">a5_pyramid_info</span><span class="op">(</span><span class="va">path</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="va">info</span></span></span>
-<span class="r-msg co"><span class="r-pr">#&gt;</span> ── a5pyramid file <span style="color: #0000BB;">file29306d291993.parquet</span> ─────────────────────────────────────</span>
+<span class="r-msg co"><span class="r-pr">#&gt;</span> ── a5pyramid file <span style="color: #0000BB;">file2a23522eeb71.parquet</span> ─────────────────────────────────────</span>
 <span class="r-msg co"><span class="r-pr">#&gt;</span> Size: 17.1 KB (footer 4.6 KB)</span>
 <span class="r-msg co"><span class="r-pr">#&gt;</span> A5 index: 1.0</span>
 <span class="r-msg co"><span class="r-pr">#&gt;</span> Leaves: resolution 15, 1,024 cells</span>

@@ -59,7 +59,10 @@ tiles to a browser itself, or to hand the pyramid to other Arrow tools.</p>
 <span>  weights <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  types <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  rep_sd <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  codecs <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  tile_size <span class="op">=</span> <span class="fl">4096L</span>,</span>
+<span>  storage <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  weights_type <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  metadata <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  threads <span class="op">=</span> <span class="cn">NULL</span></span>
 <span><span class="op">)</span></span></code></pre></div>
@@ -129,10 +132,33 @@ the standard deviations (from a whole-region build's
 agree.</p></dd>
 
 
+<dt id="arg-codecs">codecs<a class="anchor" aria-label="anchor" href="#arg-codecs"></a></dt>
+<dd><p>Named character vector of codecs for <code>"mean"</code> columns
+whose values are codes, such as <code>c(embedding = "aef")</code>. See "Codecs".
+Default <code>NULL</code>: every column stores its values.</p></dd>
+
+
 <dt id="arg-tile-size">tile_size<a class="anchor" aria-label="anchor" href="#arg-tile-size"></a></dt>
-<dd><p>The most rows in a tile (row group). Larger tiles mean
-fewer requests and a smaller footer; smaller tiles mean less data
-fetched outside the view. Default: 4096.</p></dd>
+<dd><p>The most rows in a tile. Larger tiles mean fewer
+requests and a smaller footer; smaller tiles mean less data fetched
+outside the view. Default: 4096.</p></dd>
+
+
+<dt id="arg-storage">storage<a class="anchor" aria-label="anchor" href="#arg-storage"></a></dt>
+<dd><p>Named character vector of how to store vector columns:
+<code>"fixed_binary"</code> (default), one fixed-length binary value a row, the
+smallest footer and the fastest decode; or <code>"list"</code>, a Parquet list of
+the elements, dictionary encoded, which engines such as DuckDB read as
+an array column (<code>TINYINT[]</code>), as the a5embeddings store keeps its
+embeddings (format version 4). Such as <code>c(embedding = "list")</code>.</p></dd>
+
+
+<dt id="arg-weights-type">weights_type<a class="anchor" aria-label="anchor" href="#arg-weights-type"></a></dt>
+<dd><p><code>NULL</code> (default), or a storage type (see "Column
+types") in which to keep each row's summed <code>weights</code> at every level, as
+a column named as the weights, beside the value columns and not one of
+them: a reader that merges rows of one cell weights them by it (format
+version 4 in a file). Needs <code>weights</code>.</p></dd>
 
 
 <dt id="arg-metadata">metadata<a class="anchor" aria-label="anchor" href="#arg-metadata"></a></dt>
@@ -153,12 +179,12 @@ keys <code>"a5pyramid"</code>, <code>"a5_index"</code> and <code>"ARROW:schema"<
     <div class="section level2">
     <h2 id="details">Details<a class="anchor" aria-label="anchor" href="#details"></a></h2>
     <p>Each record batch of the table is one tile, in the order of the file's
-row groups: <code>arrow::as_record_batch_reader(tbl)$batches()[[i]]</code> holds the
+tiles: <code>arrow::as_record_batch_reader(tbl)$batches()[[i]]</code> holds the
 rows of row group <code>i - 1</code> of the same pyramid written with
-<code><a href="a5_write_pyramid.html">a5_write_pyramid()</a></code>, and the table's
+<code><a href="a5_write_pyramid.html">a5_write_pyramid()</a></code> (one tile a row group), and the table's
 schema metadata holds the same entries as the file's key-value
 metadata: the index under <code>"a5pyramid"</code>, whose <code>tiles</code> and <code>tile_bbox</code>
-count record batches here as they count row groups in the file, the A5
+count record batches here as they count tiles in the file, the A5
 index version under
 <code>"a5_index"</code>, and <code>metadata</code>. The columns and their types are those of
 the file (see <code><a href="a5_write_pyramid.html">a5_write_pyramid()</a></code>); <code><a href="https://belian-earth.github.io/a5R/reference/a5_to_arrow_table.html" class="external-link">a5R::a5_from_arrow_table()</a></code>

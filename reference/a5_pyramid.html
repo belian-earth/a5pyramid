@@ -56,6 +56,8 @@ Parquet file laid out for browser rendering.</p>
 <span>  weights <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  types <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  rep_sd <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  codecs <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  weights_type <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  threads <span class="op">=</span> <span class="cn">NULL</span></span>
 <span><span class="op">)</span></span></code></pre></div>
     </div>
@@ -124,6 +126,20 @@ the standard deviations (from a whole-region build's
 agree.</p></dd>
 
 
+<dt id="arg-codecs">codecs<a class="anchor" aria-label="anchor" href="#arg-codecs"></a></dt>
+<dd><p>Named character vector of codecs for <code>"mean"</code> columns
+whose values are codes, such as <code>c(embedding = "aef")</code>. See "Codecs".
+Default <code>NULL</code>: every column stores its values.</p></dd>
+
+
+<dt id="arg-weights-type">weights_type<a class="anchor" aria-label="anchor" href="#arg-weights-type"></a></dt>
+<dd><p><code>NULL</code> (default), or a storage type (see "Column
+types") in which to keep each row's summed <code>weights</code> at every level, as
+a column named as the weights, beside the value columns and not one of
+them: a reader that merges rows of one cell weights them by it (format
+version 4 in a file). Needs <code>weights</code>.</p></dd>
+
+
 <dt id="arg-threads">threads<a class="anchor" aria-label="anchor" href="#arg-threads"></a></dt>
 <dd><p>Number of threads, or <code>NULL</code> (default) for
 <code><a href="a5pyramid_threads.html">a5pyramid_threads()</a></code>.</p></dd>
@@ -135,6 +151,7 @@ agree.</p></dd>
 and then cell id order:</p><ul><li><p><code>cell</code>: the cell, an <a href="https://belian-earth.github.io/a5R/reference/a5_cell.html" class="external-link">a5R::a5_cell</a>.</p></li>
 <li><p><code>lod</code>: its LOD (A5 resolution), an integer.</p></li>
 <li><p><code>ncell</code>: the number of leaves it summarises (1 for the leaves).</p></li>
+<li><p>with <code>weights_type</code>, the summed weights, named as the weights column.</p></li>
 <li><p>the value columns, integer for the integer types up to <code>"uint16"</code>
 and double otherwise.</p></li>
 </ul></div>
@@ -155,7 +172,9 @@ the leaves directly, never from the level below, and matches
 
 
 <p>Each value column is reduced over the leaves under each coarser cell by
-its reducer, <code>aggregate</code> unless <code>reducers</code> names another:</p><ul><li><p><code>"mean"</code>: the mean, weighted by <code>weights</code> when given.</p></li>
+its reducer, <code>aggregate</code> unless <code>reducers</code> names another:</p><ul><li><p><code>"mean"</code>: the mean, weighted by <code>weights</code> when given. For a column of
+codes with a codec (see "Codecs"), the code of the mean of the decoded
+values.</p></li>
 <li><p><code>"sum"</code>, <code>"min"</code>, <code>"max"</code>: the sum, minimum or maximum.</p></li>
 <li><p><code>"mode"</code>: the most frequent value, by total weight when <code>weights</code> is
 given, ties going to the smallest value. For category codes.</p></li>
@@ -180,11 +199,17 @@ an embedding: an integer matrix column of a data frame (one row per
 cell), or a fixed-size list of <code>int8</code> or <code>uint8</code> (or fixed-size binary,
 read as <code>uint8</code> unless <code>types</code> says <code>"int8"</code>, as arrow reads a version-3
 file's vectors) in Arrow data, as DuckDB writes <code>TINYINT[64]</code>. Its type
-is <code>"int8"</code> (default for a matrix) or <code>"uint8"</code>, and it is always reduced
-by <code>"rep_child"</code>: every element takes part in the distance to the cell's
-mean, scaled by one standard deviation over all the elements (fixed by
-<code>rep_sd</code> like any other column), so a coarse cell holds the whole vector
-of one leaf. A file stores it as one fixed-length binary column, so a
+is <code>"int8"</code> (default for a matrix) or <code>"uint8"</code>. It is reduced by
+<code>"rep_child"</code> whatever <code>aggregate</code> says: every element takes part in the
+distance to the cell's mean, scaled by one standard deviation over all
+the elements (fixed by <code>rep_sd</code> like any other column), so a coarse cell
+holds the whole vector of one leaf. Named <code>"mean"</code> in <code>reducers</code>, it is
+reduced element by element instead: each element of a coarse cell is the
+(weighted) mean of its leaves' elements, of their decoded values with a
+codec, stored as the vector's type; a cell whose leaves all have weight 0
+takes their unweighted mean, since a vector is never missing. A mean
+vector takes no part in choosing representatives. A file stores a vector
+as one fixed-length binary column, so a
 64-element vector costs one column's metadata a tile rather than 64, and
 one byte an element. Files with a vector column are format version 3.
 <code>a5_pyramid()</code> and <code><a href="a5_read_pyramid.html">a5_read_pyramid()</a></code> return it as an integer matrix
@@ -208,6 +233,30 @@ colour channel is a valid channel, and <code>"float32"</code> rounds to single
 precision. <code>a5_pyramid()</code> returns the stored values. For a browser,
 <code>"uint8"</code> suits colour channels and <code>"float32"</code> halves the size of
 continuous values.</p>
+    </div>
+    <div class="section level2">
+    <h2 id="codecs">Codecs<a class="anchor" aria-label="anchor" href="#codecs"></a></h2>
+
+
+<p>A <em>codec</em> says how a column's stored codes map to the values they stand
+for. With one, a <code>"mean"</code> decodes each leaf's code, takes the (weighted)
+mean of the values and encodes it, so a coarse cell holds the code of the
+mean of its leaves' values rather than the mean of their codes, which
+differ for a nonlinear code. The leaves keep their codes as given. The
+codec is recorded in the index (<code><a href="a5_pyramid_info.html">a5_pyramid_info()</a></code>) for readers to
+decode with. One codec is defined:</p><ul><li><p><code>"aef"</code>: AlphaEarth Foundations embeddings, <code>"int8"</code> codes decoded as
+<code>sign(x) * (x / 127.5)^2</code> and encoded as
+<code>round(sign(v) * sqrt(abs(v)) * 127.5)</code>, rounded half away from zero and
+clamped to -128 to 127, as the a5embeddings store encodes its cell
+means. A coarse cell holds the code the store would write for the mean
+of its leaves' decoded embeddings; with each leaf's pixel count as
+<code>weights</code>, for the mean of their pixels, up to the leaves' own
+rounding. The mean is taken on <code>x * abs(x)</code>, the value times 127.5^2,
+which is exact for whole codes and weights, so a mean exactly half way
+between two codes rounds away from zero whatever the order of the
+sum.</p></li>
+</ul><p>A codec applies to <code>"mean"</code> columns, scalar or vector, stored as its code
+type.</p>
     </div>
     <div class="section level2">
     <h2 id="see-also">See also<a class="anchor" aria-label="anchor" href="#see-also"></a></h2>

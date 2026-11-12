@@ -2,9 +2,9 @@
 
 Reads the rows of the tiles at `lod` whose bounding boxes meet `bbox`,
 as a renderer does for a view: the footer first, then only those tiles'
-row groups. Selection is by tile, so rows of a selected tile that lie
-outside `bbox` are returned too; filter the cells afterwards for an
-exact cut.
+row groups, or their data pages where row groups hold several tiles.
+Selection is by tile, so rows of a selected tile that lie outside `bbox`
+are returned too; filter the cells afterwards for an exact cut.
 
 ## Usage
 
@@ -35,7 +35,10 @@ a5_read_pyramid(src, lod = NULL, bbox = NULL)
 
 A tibble with the columns of
 [`a5_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid.md),
-in file order: ascending LOD, then cell id.
+in file order: ascending LOD, then cell id; with an `owner` column (an
+[a5R::a5_cell](https://belian-earth.github.io/a5R/reference/a5_cell.html))
+and the weights column where the file has them. A file without `lod` or
+`ncell` columns gives its level and 1.
 
 ## See also
 

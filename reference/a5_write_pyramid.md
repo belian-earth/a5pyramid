@@ -19,7 +19,11 @@ a5_write_pyramid(
   weights = NULL,
   types = NULL,
   rep_sd = NULL,
+  codecs = NULL,
   tile_size = 4096L,
+  row_group_size = NULL,
+  storage = NULL,
+  weights_type = NULL,
   compression = c("snappy", "zstd", "none"),
   metadata = NULL,
   threads = NULL
@@ -100,11 +104,40 @@ a5_write_pyramid(
   a whole-region build's `a5_pyramid_info()$columns$sd`, say) for builds
   whose cells must agree.
 
+- codecs:
+
+  Named character vector of codecs for `"mean"` columns whose values are
+  codes, such as `c(embedding = "aef")`. See "Codecs". Default `NULL`:
+  every column stores its values.
+
 - tile_size:
 
-  The most rows in a tile (row group). Larger tiles mean fewer requests
-  and a smaller footer; smaller tiles mean less data fetched outside the
-  view. Default: 4096.
+  The most rows in a tile. Larger tiles mean fewer requests and a
+  smaller footer; smaller tiles mean less data fetched outside the view.
+  Default: 4096.
+
+- row_group_size:
+
+  `NULL` (default) for one tile a row group, or the most rows in a row
+  group of several tiles, at least `tile_size` (see "File layout"). The
+  embeddings store uses 131072 with tiles of 16384.
+
+- storage:
+
+  Named character vector of how to store vector columns:
+  `"fixed_binary"` (default), one fixed-length binary value a row, the
+  smallest footer and the fastest decode; or `"list"`, a Parquet list of
+  the elements, dictionary encoded, which engines such as DuckDB read as
+  an array column (`TINYINT[]`), as the a5embeddings store keeps its
+  embeddings (format version 4). Such as `c(embedding = "list")`.
+
+- weights_type:
+
+  `NULL` (default), or a storage type (see "Column types") in which to
+  keep each row's summed `weights` at every level, as a column named as
+  the weights, beside the value columns and not one of them: a reader
+  that merges rows of one cell weights them by it (format version 4 in a
+  file). Needs `weights`.
 
 - compression:
 
@@ -136,6 +169,14 @@ globe. A level is split down the A5 index hierarchy only where a run
 holds more than `tile_size` cells, which makes tiles coarse where data
 is sparse and fine where it is dense, and keeps every level sorted by
 cell id.
+
+With `row_group_size`, each level is split down the hierarchy into row
+groups of at most `row_group_size` rows instead, and each row group into
+tiles of `tile_size` rows (the last shorter), each one data page of
+every column. Engines that read whole row groups, such as DuckDB over
+S3, then make fewer requests, while a browser still reads one tile at a
+time: the file carries the Parquet page index, which locates each tile's
+pages. Such a file is in format version 4.
 
 The file's key-value metadata holds a JSON index under `"a5pyramid"`:
 the leaves' resolution, the value columns with their types and reducers,
@@ -173,7 +214,7 @@ x <- data.frame(cell = cells, value = runif(length(cells)))
 path <- tempfile(fileext = ".parquet")
 a5_write_pyramid(x, path, types = c(value = "float32"), tile_size = 1000)
 a5_pyramid_info(path)
-#> ── a5pyramid file file29306eb17f9b.parquet ─────────────────────────────────────
+#> ── a5pyramid file file2a231bfd60fc.parquet ─────────────────────────────────────
 #> Size: 13.2 KB (footer 4.8 KB)
 #> A5 index: 1.0
 #> Leaves: resolution 15, 1,024 cells

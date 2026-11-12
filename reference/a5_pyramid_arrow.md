@@ -21,7 +21,10 @@ a5_pyramid_arrow(
   weights = NULL,
   types = NULL,
   rep_sd = NULL,
+  codecs = NULL,
   tile_size = 4096L,
+  storage = NULL,
+  weights_type = NULL,
   metadata = NULL,
   threads = NULL
 )
@@ -95,11 +98,34 @@ a5_pyramid_arrow(
   a whole-region build's `a5_pyramid_info()$columns$sd`, say) for builds
   whose cells must agree.
 
+- codecs:
+
+  Named character vector of codecs for `"mean"` columns whose values are
+  codes, such as `c(embedding = "aef")`. See "Codecs". Default `NULL`:
+  every column stores its values.
+
 - tile_size:
 
-  The most rows in a tile (row group). Larger tiles mean fewer requests
-  and a smaller footer; smaller tiles mean less data fetched outside the
-  view. Default: 4096.
+  The most rows in a tile. Larger tiles mean fewer requests and a
+  smaller footer; smaller tiles mean less data fetched outside the view.
+  Default: 4096.
+
+- storage:
+
+  Named character vector of how to store vector columns:
+  `"fixed_binary"` (default), one fixed-length binary value a row, the
+  smallest footer and the fastest decode; or `"list"`, a Parquet list of
+  the elements, dictionary encoded, which engines such as DuckDB read as
+  an array column (`TINYINT[]`), as the a5embeddings store keeps its
+  embeddings (format version 4). Such as `c(embedding = "list")`.
+
+- weights_type:
+
+  `NULL` (default), or a storage type (see "Column types") in which to
+  keep each row's summed `weights` at every level, as a column named as
+  the weights, beside the value columns and not one of them: a reader
+  that merges rows of one cell weights them by it (format version 4 in a
+  file). Needs `weights`.
 
 - metadata:
 
@@ -119,14 +145,14 @@ An Arrow `Table` with one record batch per tile.
 ## Details
 
 Each record batch of the table is one tile, in the order of the file's
-row groups: `arrow::as_record_batch_reader(tbl)$batches()[[i]]` holds
-the rows of row group `i - 1` of the same pyramid written with
-[`a5_write_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid.md),
-and the table's schema metadata holds the same entries as the file's
-key-value metadata: the index under `"a5pyramid"`, whose `tiles` and
-`tile_bbox` count record batches here as they count row groups in the
-file, the A5 index version under `"a5_index"`, and `metadata`. The
-columns and their types are those of the file (see
+tiles: `arrow::as_record_batch_reader(tbl)$batches()[[i]]` holds the
+rows of row group `i - 1` of the same pyramid written with
+[`a5_write_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid.md)
+(one tile a row group), and the table's schema metadata holds the same
+entries as the file's key-value metadata: the index under `"a5pyramid"`,
+whose `tiles` and `tile_bbox` count record batches here as they count
+tiles in the file, the A5 index version under `"a5_index"`, and
+`metadata`. The columns and their types are those of the file (see
 [`a5_write_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid.md));
 [`a5R::a5_from_arrow_table()`](https://belian-earth.github.io/a5R/reference/a5_to_arrow_table.html)
 converts the table to a data frame with an

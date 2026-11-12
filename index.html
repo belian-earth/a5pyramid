@@ -74,7 +74,7 @@
 </tr>
 <tr>
 <td>Reduce</td>
-<td>mean, sum, min, max, mode, or a representative leaf that keeps real combinations of values such as colours</td>
+<td>mean, sum, min, max, mode, or a representative leaf that keeps real combinations of values such as colours; a mean of codes, such as AEF embeddings, is taken on the values they decode to</td>
 </tr>
 <tr>
 <td>Read</td>
@@ -148,7 +148,7 @@
 <h2 id="how-it-works">How it works<a class="anchor" aria-label="anchor" href="#how-it-works"></a>
 </h2>
 <p><strong>Levels.</strong> A cell at LOD <code>r</code> summarises the leaves whose centres it contains (<code><a href="https://belian-earth.github.io/a5R/reference/a5_spatial_hierarchy.html" class="external-link">a5R::a5_cell_to_supercell()</a></code>). Supercells do not chain: a leaf’s supercell two resolutions up is often not the supercell of its supercell one resolution up, so every level is grouped from the leaves directly.</p>
-<p><strong>Tiles.</strong> Each level is split into tiles of at most <code>tile_size</code> rows, one Parquet row group each. A tile is a run of consecutive cell ids, and A5 ids follow a space-filling curve, so a run is a compact patch of the globe. Levels are split down the A5 hierarchy only where a run holds more cells than fit a tile, so tiles are coarse where data is sparse and fine where it is dense, and every level stays sorted by cell id.</p>
+<p><strong>Tiles.</strong> Each level is split into tiles of at most <code>tile_size</code> rows, one Parquet row group each. A tile is a run of consecutive cell ids, and A5 ids follow a space-filling curve, so a run is a compact patch of the globe. Levels are split down the A5 hierarchy only where a run holds more cells than fit a tile, so tiles are coarse where data is sparse and fine where it is dense, and every level stays sorted by cell id. With <code>row_group_size</code>, a row group holds several tiles, each one data page located through the Parquet page index, so an engine that scans whole row groups, such as DuckDB over S3, makes fewer requests while a browser still reads one tile at a time (format version 4).</p>
 <p><strong>Index.</strong> The file’s key-value metadata holds a JSON index of the levels, the value columns, and the bounding box of every tile, computed from the cells’ boundaries (antimeridian and poles included). Cell ids are delta encoded, which takes them from 8 bytes per row to about 3, and Snappy compression keeps the file readable by hyparquet with no extra libraries. The test suite reads files with hyparquet under Node and checks that only the footer and the requested tile are fetched.</p>
 </div>
 <div class="section level2">

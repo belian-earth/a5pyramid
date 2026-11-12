@@ -23,6 +23,10 @@ a5_write_pyramid_set(
   weights = NULL,
   types = NULL,
   rep_sd = NULL,
+  codecs = NULL,
+  storage = NULL,
+  weights_type = NULL,
+  index = c("json", "parquet"),
   compression = c("snappy", "zstd", "none"),
   metadata = NULL,
   threads = NULL
@@ -72,9 +76,11 @@ a5_write_pyramid_set(
 
   A data frame with one row per tier and columns `lod_min` and `lod_max`
   (the tier's LODs, inclusive), `shard_resolution` (from 0 up to
-  `lod_min`) and optionally `tile_size` (default 16384). Between them
-  the tiers must hold every level, the leaves included, and each must
-  hold at least one. Default:
+  `lod_min`), and optionally `tile_size` (default 16384) and
+  `row_group_size` (default `NA`, one tile a row group; see
+  [`a5_write_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid.md)).
+  Between them the tiers must hold every level, the leaves included, and
+  each must hold at least one. Default:
   [`a5_pyramid_set_tiers()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_set_tiers.md).
 
 - aggregate:
@@ -109,6 +115,35 @@ a5_write_pyramid_set(
   even where their cells are the same; fix the standard deviations (from
   a whole-region build's `a5_pyramid_info()$columns$sd`, say) for builds
   whose cells must agree.
+
+- codecs:
+
+  Named character vector of codecs for `"mean"` columns whose values are
+  codes, such as `c(embedding = "aef")`. See "Codecs". Default `NULL`:
+  every column stores its values.
+
+- storage:
+
+  Named character vector of how to store vector columns:
+  `"fixed_binary"` (default), one fixed-length binary value a row, the
+  smallest footer and the fastest decode; or `"list"`, a Parquet list of
+  the elements, dictionary encoded, which engines such as DuckDB read as
+  an array column (`TINYINT[]`), as the a5embeddings store keeps its
+  embeddings (format version 4). Such as `c(embedding = "list")`.
+
+- weights_type:
+
+  `NULL` (default), or a storage type (see "Column types") in which to
+  keep each row's summed `weights` at every level, as a column named as
+  the weights, beside the value columns and not one of them: a reader
+  that merges rows of one cell weights them by it (format version 4 in a
+  file). Needs `weights`.
+
+- index:
+
+  `"json"` (default) for `set.json`, or `"parquet"` for `set.parquet`, a
+  shard table (format version 4; see
+  [`a5_write_pyramid_set_table()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid_set_table.md)).
 
 - compression:
 
@@ -189,7 +224,7 @@ tiers <- data.frame(
 a5_write_pyramid_set(x, dest, tiers = tiers)
 info <- a5_pyramid_set_info(dest)
 info
-#> ── a5pyramid set file29306529c8fa ──────────────────────────────────────────────
+#> ── a5pyramid set file2a23776c7ae0 ──────────────────────────────────────────────
 #> Size: 24.7 KB in 6 shards
 #> A5 index: 1.0
 #> Leaves: resolution 15
@@ -205,10 +240,10 @@ info$shards
 #>    tier cell             path   rows tiles bytes footer_bytes   xmin  ymin  xmax
 #>   <int> <a5_cell>        <chr> <dbl> <int> <dbl>        <dbl>  <dbl> <dbl> <dbl>
 #> 1     0 0200000000000000 tier…     1     1  1228         1093 -21     52.2 15   
-#> 2     0 1200000000000000 tier…    45    10  5361         3460 -13.2   50.0 -1.52
-#> 3     1 6316008000000000 tier…   162     3  3200         1388  -3.22  56.0 -3.16
-#> 4     1 63bb948000000000 tier…   977     3  9202         1398  -3.22  55.9 -3.14
-#> 5     1 63bb958000000000 tier…    32     3  2153         1375  -3.15  56.0 -3.13
-#> 6     1 63bb968000000000 tier…   209     3  3575         1386  -3.18  55.9 -3.12
+#> 2     0 1200000000000000 tier…    45    10  5360         3460 -13.2   50.0 -1.52
+#> 3     1 6316008000000000 tier…   162     3  3197         1388  -3.22  56.0 -3.16
+#> 4     1 63bb948000000000 tier…   977     3  9209         1398  -3.22  55.9 -3.14
+#> 5     1 63bb958000000000 tier…    32     3  2151         1375  -3.15  56.0 -3.13
+#> 6     1 63bb968000000000 tier…   209     3  3582         1386  -3.18  55.9 -3.12
 #> # ℹ 1 more variable: ymax <dbl>
 ```

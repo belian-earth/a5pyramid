@@ -11,6 +11,8 @@ table or a Parquet file.
   : Build a level-of-detail pyramid as an Arrow table
 - [`a5_write_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid.md)
   : Write a level-of-detail pyramid of A5 cells to Parquet
+- [`a5_write_pyramid_level()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid_level.md)
+  : Write one level of precomputed rows as a pyramid file
 
 ## Reading pyramids
 
@@ -32,6 +34,8 @@ view.
   : Default tiers of a pyramid set
 - [`a5_pyramid_set_info()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_set_info.md)
   : Inspect a pyramid set
+- [`a5_write_pyramid_set_table()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid_set_table.md)
+  : Write a set's shard table
 
 ## Configuration
 

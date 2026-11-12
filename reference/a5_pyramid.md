@@ -19,6 +19,8 @@ a5_pyramid(
   weights = NULL,
   types = NULL,
   rep_sd = NULL,
+  codecs = NULL,
+  weights_type = NULL,
   threads = NULL
 )
 ```
@@ -91,6 +93,20 @@ a5_pyramid(
   a whole-region build's `a5_pyramid_info()$columns$sd`, say) for builds
   whose cells must agree.
 
+- codecs:
+
+  Named character vector of codecs for `"mean"` columns whose values are
+  codes, such as `c(embedding = "aef")`. See "Codecs". Default `NULL`:
+  every column stores its values.
+
+- weights_type:
+
+  `NULL` (default), or a storage type (see "Column types") in which to
+  keep each row's summed `weights` at every level, as a column named as
+  the weights, beside the value columns and not one of them: a reader
+  that merges rows of one cell weights them by it (format version 4 in a
+  file). Needs `weights`.
+
 - threads:
 
   Number of threads, or `NULL` (default) for
@@ -107,6 +123,8 @@ cell id order:
 - `lod`: its LOD (A5 resolution), an integer.
 
 - `ncell`: the number of leaves it summarises (1 for the leaves).
+
+- with `weights_type`, the summed weights, named as the weights column.
 
 - the value columns, integer for the integer types up to `"uint16"` and
   double otherwise.
@@ -128,7 +146,9 @@ resolution.
 Each value column is reduced over the leaves under each coarser cell by
 its reducer, `aggregate` unless `reducers` names another:
 
-- `"mean"`: the mean, weighted by `weights` when given.
+- `"mean"`: the mean, weighted by `weights` when given. For a column of
+  codes with a codec (see "Codecs"), the code of the mean of the decoded
+  values.
 
 - `"sum"`, `"min"`, `"max"`: the sum, minimum or maximum.
 
@@ -155,14 +175,19 @@ an embedding: an integer matrix column of a data frame (one row per
 cell), or a fixed-size list of `int8` or `uint8` (or fixed-size binary,
 read as `uint8` unless `types` says `"int8"`, as arrow reads a version-3
 file's vectors) in Arrow data, as DuckDB writes `TINYINT[64]`. Its type
-is `"int8"` (default for a matrix) or `"uint8"`, and it is always
-reduced by `"rep_child"`: every element takes part in the distance to
-the cell's mean, scaled by one standard deviation over all the elements
-(fixed by `rep_sd` like any other column), so a coarse cell holds the
-whole vector of one leaf. A file stores it as one fixed-length binary
-column, so a 64-element vector costs one column's metadata a tile rather
-than 64, and one byte an element. Files with a vector column are format
-version 3. `a5_pyramid()` and
+is `"int8"` (default for a matrix) or `"uint8"`. It is reduced by
+`"rep_child"` whatever `aggregate` says: every element takes part in the
+distance to the cell's mean, scaled by one standard deviation over all
+the elements (fixed by `rep_sd` like any other column), so a coarse cell
+holds the whole vector of one leaf. Named `"mean"` in `reducers`, it is
+reduced element by element instead: each element of a coarse cell is the
+(weighted) mean of its leaves' elements, of their decoded values with a
+codec, stored as the vector's type; a cell whose leaves all have weight
+0 takes their unweighted mean, since a vector is never missing. A mean
+vector takes no part in choosing representatives. A file stores a vector
+as one fixed-length binary column, so a 64-element vector costs one
+column's metadata a tile rather than 64, and one byte an element. Files
+with a vector column are format version 3. `a5_pyramid()` and
 [`a5_read_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_read_pyramid.md)
 return it as an integer matrix column. Vector columns come after the
 scalar columns, whatever the order they are selected in. When a vector
@@ -182,6 +207,31 @@ clamps to its range, so the mean of a `"uint8"` colour channel is a
 valid channel, and `"float32"` rounds to single precision.
 `a5_pyramid()` returns the stored values. For a browser, `"uint8"` suits
 colour channels and `"float32"` halves the size of continuous values.
+
+## Codecs
+
+A *codec* says how a column's stored codes map to the values they stand
+for. With one, a `"mean"` decodes each leaf's code, takes the (weighted)
+mean of the values and encodes it, so a coarse cell holds the code of
+the mean of its leaves' values rather than the mean of their codes,
+which differ for a nonlinear code. The leaves keep their codes as given.
+The codec is recorded in the index
+([`a5_pyramid_info()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_info.md))
+for readers to decode with. One codec is defined:
+
+- `"aef"`: AlphaEarth Foundations embeddings, `"int8"` codes decoded as
+  `sign(x) * (x / 127.5)^2` and encoded as
+  `round(sign(v) * sqrt(abs(v)) * 127.5)`, rounded half away from zero
+  and clamped to -128 to 127, as the a5embeddings store encodes its cell
+  means. A coarse cell holds the code the store would write for the mean
+  of its leaves' decoded embeddings; with each leaf's pixel count as
+  `weights`, for the mean of their pixels, up to the leaves' own
+  rounding. The mean is taken on `x * abs(x)`, the value times 127.5^2,
+  which is exact for whole codes and weights, so a mean exactly half way
+  between two codes rounds away from zero whatever the order of the sum.
+
+A codec applies to `"mean"` columns, scalar or vector, stored as its
+code type.
 
 ## See also
 

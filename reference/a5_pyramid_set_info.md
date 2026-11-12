@@ -30,22 +30,30 @@ A list of class `a5pyramid_set_info`:
 
 - `bbox`: `c(xmin, ymin, xmax, ymax)` of every shard.
 
-- `columns`: a tibble of the value columns' `name`, `type`, `reducer`
-  and `sd`, the standard deviation that scaled a `"rep_child"` column (1
-  where the leaves' standard deviation is 0 or undefined; `NA` for other
-  reducers and older files), and `dim`, the elements per cell of a
-  vector column (`NA` for scalar columns).
+- `columns`: a tibble of the value columns' `name`, `type`, `reducer`,
+  `codec` (see
+  [`a5_pyramid()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid.md);
+  `NA` for a column that stores its values) and `sd`, the standard
+  deviation that scaled a `"rep_child"` column (1 where the leaves'
+  standard deviation is 0 or undefined; `NA` for other reducers and
+  older files), and `dim`, the elements per cell of a vector column
+  (`NA` for scalar columns).
 
 - `tiers`: a tibble with one row per tier: `tier` (from 0), `lod_min`,
-  `lod_max`, `shard_resolution`, `tile_size`, and its `shards`, `rows`
-  and `bytes`.
+  `lod_max`, `shard_resolution`, `tile_size`, `row_group_size` (`NA` for
+  one tile a row group), and its `shards`, `rows` and `bytes`.
+
+- `weights`: the weights column every shard stores (a list of its `name`
+  and `type`), or `NULL`.
 
 - `shards`: a tibble with one row per shard: `tier`, `cell` (the shard
   cell, an
   [a5R::a5_cell](https://belian-earth.github.io/a5R/reference/a5_cell.html)),
-  `path` (relative to the set's directory), `rows`, `tiles`, `bytes`,
-  `footer_bytes` (what a reader fetches to open it) and `xmin`, `ymin`,
-  `xmax`, `ymax`.
+  `path` (relative to the set's directory; `NA` for a shard listed as
+  empty, with no file), `rows`, `tiles`, `bytes`, `footer_bytes` (what a
+  reader fetches to open it) and `xmin`, `ymin`, `xmax`, `ymax`; for a
+  shard table, its writer's own columns follow, read with arrow where it
+  is installed.
 
 - `metadata`: the set's metadata, a named character vector.
 
@@ -63,9 +71,10 @@ cells <- a5_uncompact(a5_spherical_cap(centre, 3000), resolution = 15)
 dest <- tempfile()
 a5_write_pyramid_set(data.frame(cell = cells, value = runif(length(cells))), dest)
 a5_pyramid_set_info(dest)$tiers
-#> # A tibble: 2 × 8
-#>    tier lod_min lod_max shard_resolution tile_size shards  rows bytes
-#>   <int>   <int>   <int>            <int>     <int>  <int> <dbl> <dbl>
-#> 1     0       2      12                0     16384      2    46  6591
-#> 2     1      13      15                3     16384      1  1380 11857
+#> # A tibble: 2 × 9
+#>    tier lod_min lod_max shard_resolution tile_size row_group_size shards  rows
+#>   <int>   <int>   <int>            <int>     <int>          <int>  <int> <dbl>
+#> 1     0       2      12                0     16384             NA      2    46
+#> 2     1      13      15                3     16384             NA      1  1380
+#> # ℹ 1 more variable: bytes <dbl>
 ```

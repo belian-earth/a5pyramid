@@ -63,17 +63,22 @@ the footers of the shards its view meets.</p>
 <li><p><code>data_resolution</code>: the leaves' resolution.</p></li>
 <li><p><code>bbox</code>: <code>c(xmin, ymin, xmax, ymax)</code> of every shard.</p></li>
 <li><p><code>columns</code>: a tibble of the value columns' <code>name</code>, <code>type</code>,
-<code>reducer</code> and <code>sd</code>, the standard deviation that scaled a
+<code>reducer</code>, <code>codec</code> (see <code><a href="a5_pyramid.html">a5_pyramid()</a></code>; <code>NA</code> for a column that
+stores its values) and <code>sd</code>, the standard deviation that scaled a
 <code>"rep_child"</code> column (1 where the leaves' standard deviation is 0 or
 undefined; <code>NA</code> for other reducers and older files), and <code>dim</code>, the
 elements per cell of a vector column (<code>NA</code> for scalar columns).</p></li>
 <li><p><code>tiers</code>: a tibble with one row per tier: <code>tier</code> (from 0), <code>lod_min</code>,
-<code>lod_max</code>, <code>shard_resolution</code>, <code>tile_size</code>, and its <code>shards</code>, <code>rows</code>
-and <code>bytes</code>.</p></li>
+<code>lod_max</code>, <code>shard_resolution</code>, <code>tile_size</code>, <code>row_group_size</code> (<code>NA</code>
+for one tile a row group), and its <code>shards</code>, <code>rows</code> and <code>bytes</code>.</p></li>
+<li><p><code>weights</code>: the weights column every shard stores (a list of its
+<code>name</code> and <code>type</code>), or <code>NULL</code>.</p></li>
 <li><p><code>shards</code>: a tibble with one row per shard: <code>tier</code>, <code>cell</code> (the shard
-cell, an <a href="https://belian-earth.github.io/a5R/reference/a5_cell.html" class="external-link">a5R::a5_cell</a>), <code>path</code> (relative to the set's directory),
-<code>rows</code>, <code>tiles</code>, <code>bytes</code>, <code>footer_bytes</code> (what a reader fetches to
-open it) and <code>xmin</code>, <code>ymin</code>, <code>xmax</code>, <code>ymax</code>.</p></li>
+cell, an <a href="https://belian-earth.github.io/a5R/reference/a5_cell.html" class="external-link">a5R::a5_cell</a>), <code>path</code> (relative to the set's directory;
+<code>NA</code> for a shard listed as empty, with no file), <code>rows</code>, <code>tiles</code>,
+<code>bytes</code>, <code>footer_bytes</code> (what a reader fetches to open it) and
+<code>xmin</code>, <code>ymin</code>, <code>xmax</code>, <code>ymax</code>; for a shard table, its writer's own
+columns follow, read with arrow where it is installed.</p></li>
 <li><p><code>metadata</code>: the set's metadata, a named character vector.</p></li>
 </ul></div>
     <div class="section level2">
@@ -89,11 +94,12 @@ open it) and <code>xmin</code>, <code>ymin</code>, <code>xmax</code>, <code>ymax
 <span class="r-in"><span><span class="va">dest</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/tempfile.html" class="external-link">tempfile</a></span><span class="op">(</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="fu"><a href="a5_write_pyramid_set.html">a5_write_pyramid_set</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/data.frame.html" class="external-link">data.frame</a></span><span class="op">(</span>cell <span class="op">=</span> <span class="va">cells</span>, value <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/stats/Uniform.html" class="external-link">runif</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/length.html" class="external-link">length</a></span><span class="op">(</span><span class="va">cells</span><span class="op">)</span><span class="op">)</span><span class="op">)</span>, <span class="va">dest</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="fu">a5_pyramid_set_info</span><span class="op">(</span><span class="va">dest</span><span class="op">)</span><span class="op">$</span><span class="va">tiers</span></span></span>
-<span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #949494;"># A tibble: 2 × 8</span></span>
-<span class="r-out co"><span class="r-pr">#&gt;</span>    tier lod_min lod_max shard_resolution tile_size shards  rows bytes</span>
-<span class="r-out co"><span class="r-pr">#&gt;</span>   <span style="color: #949494; font-style: italic;">&lt;int&gt;</span>   <span style="color: #949494; font-style: italic;">&lt;int&gt;</span>   <span style="color: #949494; font-style: italic;">&lt;int&gt;</span>            <span style="color: #949494; font-style: italic;">&lt;int&gt;</span>     <span style="color: #949494; font-style: italic;">&lt;int&gt;</span>  <span style="color: #949494; font-style: italic;">&lt;int&gt;</span> <span style="color: #949494; font-style: italic;">&lt;dbl&gt;</span> <span style="color: #949494; font-style: italic;">&lt;dbl&gt;</span></span>
-<span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #BCBCBC;">1</span>     0       2      12                0     <span style="text-decoration: underline;">16</span>384      2    46  <span style="text-decoration: underline;">6</span>591</span>
-<span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #BCBCBC;">2</span>     1      13      15                3     <span style="text-decoration: underline;">16</span>384      1  <span style="text-decoration: underline;">1</span>380 <span style="text-decoration: underline;">11</span>857</span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #949494;"># A tibble: 2 × 9</span></span>
+<span class="r-out co"><span class="r-pr">#&gt;</span>    tier lod_min lod_max shard_resolution tile_size row_group_size shards  rows</span>
+<span class="r-out co"><span class="r-pr">#&gt;</span>   <span style="color: #949494; font-style: italic;">&lt;int&gt;</span>   <span style="color: #949494; font-style: italic;">&lt;int&gt;</span>   <span style="color: #949494; font-style: italic;">&lt;int&gt;</span>            <span style="color: #949494; font-style: italic;">&lt;int&gt;</span>     <span style="color: #949494; font-style: italic;">&lt;int&gt;</span>          <span style="color: #949494; font-style: italic;">&lt;int&gt;</span>  <span style="color: #949494; font-style: italic;">&lt;int&gt;</span> <span style="color: #949494; font-style: italic;">&lt;dbl&gt;</span></span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #BCBCBC;">1</span>     0       2      12                0     <span style="text-decoration: underline;">16</span>384             <span style="color: #BB0000;">NA</span>      2    46</span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #BCBCBC;">2</span>     1      13      15                3     <span style="text-decoration: underline;">16</span>384             <span style="color: #BB0000;">NA</span>      1  <span style="text-decoration: underline;">1</span>380</span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #949494;"># ℹ 1 more variable: bytes &lt;dbl&gt;</span></span>
 </code></pre></div>
     </div>
   </main><aside class="col-md-3"><nav id="toc" aria-label="Table of contents"><h2>On this page</h2>

@@ -28,19 +28,20 @@ a5_pyramid_set_tiers(data_resolution, lods = NULL)
 ## Value
 
 A data frame with one row per tier, in ascending LOD order: `lod_min`,
-`lod_max`, `shard_resolution` and `tile_size`.
+`lod_max`, `shard_resolution`, `tile_size` and `row_group_size` (`NA`:
+one tile a row group).
 
 ## Examples
 
 ``` r
 a5_pyramid_set_tiers(18)
-#>   lod_min lod_max shard_resolution tile_size
-#> 1       2      12                0     16384
-#> 2      13      15                3     16384
-#> 3      16      18                6     16384
+#>   lod_min lod_max shard_resolution tile_size row_group_size
+#> 1       2      12                0     16384             NA
+#> 2      13      15                3     16384             NA
+#> 3      16      18                6     16384             NA
 a5_pyramid_set_tiers(16, lods = c(4, 8, 12, 14))
-#>   lod_min lod_max shard_resolution tile_size
-#> 1       4      10                0     16384
-#> 2      11      13                1     16384
-#> 3      14      16                4     16384
+#>   lod_min lod_max shard_resolution tile_size row_group_size
+#> 1       4      10                0     16384             NA
+#> 2      11      13                1     16384             NA
+#> 3      14      16                4     16384             NA
 ```
