@@ -98,6 +98,6 @@ a5_pyramid_set_info(dir)$shards
 #> # A tibble: 1 × 11
 #>    tier cell             path    rows tiles bytes footer_bytes  xmin  ymin  xmax
 #>   <int> <a5_cell>        <chr>  <dbl> <int> <dbl>        <dbl> <dbl> <dbl> <dbl>
-#> 1     0 63bb920000000000 leave…  1024     1  6311          638 -3.22  55.9 -3.13
+#> 1     0 63bb920000000000 leave…  1024     1  6318          638 -3.22  55.9 -3.13
 #> # ℹ 1 more variable: ymax <dbl>
 ```

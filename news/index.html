@@ -33,7 +33,15 @@
 
     <div class="section level2">
 <h2 class="pkg-version" data-toc-text="development version" id="a5pyramid-development-version">a5pyramid (development version)<a class="anchor" aria-label="anchor" href="#a5pyramid-development-version"></a></h2>
-<ul><li><p>a5R comes from CRAN: <code>Remotes</code> no longer names <code>belian-earth/a5R</code>, now that a5R 1.0.0 is released. An unpinned remote is a request for a5R’s default branch, and pak refused to install a5pyramid beside any other pinned a5R ref (belian-production’s base image pins a5R by commit).</p></li>
+<ul><li>
+<p><strong>Partial rows</strong> for pyramids of a region built in parts (a store’s partitions, each built alone), whose coarse levels span the parts:</p>
+<ul><li>
+<code><a href="../reference/a5_pyramid_partials.html">a5_pyramid_partials()</a></code> reduces leaves to exact sums at coarse LODs: for each cell, its leaves, their summed weights, and each mean vector’s weighted sums of lifted values (the codec’s lift, <code>code * |code|</code> for <code>"aef"</code>), keyed by the cell’s supercell at a key resolution. An Arrow table whose schema metadata (<code>"a5pyramid_partials"</code>) records how to encode it; Parquet keeps it.</li>
+<li>
+<code><a href="../reference/a5_pyramid_merge_partials.html">a5_pyramid_merge_partials()</a></code> adds the rows of every part, cell by cell, optionally for some keys only (one shard), reading Arrow tables, readers or datasets batch by batch, and encodes each mean as <code><a href="../reference/a5_pyramid.html">a5_pyramid()</a></code> does. The result is the rows <code><a href="../reference/a5_pyramid.html">a5_pyramid()</a></code> gives for all the leaves at once, ready for <code><a href="../reference/a5_write_pyramid_level.html">a5_write_pyramid_level()</a></code>.</li>
+<li>With integer weights the sums are exact, so the merged codes do not depend on how the leaves were split. Only mean vectors merge; every weight must be above zero.</li>
+</ul></li>
+<li><p>a5R comes from CRAN: <code>Remotes</code> no longer names <code>belian-earth/a5R</code>, now that a5R 1.0.0 is released. An unpinned remote is a request for a5R’s default branch, and pak refused to install a5pyramid beside any other pinned a5R ref (belian-production’s base image pins a5R by commit).</p></li>
 <li>
 <p>The rest of format version 4, for one store that engines and browsers read alike (belian-production <code>docs/store-v4.md</code>):</p>
 <ul><li>

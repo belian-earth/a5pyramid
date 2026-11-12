@@ -175,7 +175,7 @@ path <- tempfile(fileext = ".parquet")
 a5_write_pyramid_level(l12, path, value, data_resolution = 15, ncell = "ncell", weights = "n",
                        tile_size = 100, compression = "snappy")
 a5_pyramid_info(path)
-#> ── a5pyramid file file29344c4155c5.parquet ─────────────────────────────────────
+#> ── a5pyramid file file29673006afc7.parquet ─────────────────────────────────────
 #> Size: 1.2 KB (footer 739 B)
 #> A5 index: 1.0
 #> Leaves: resolution 15, 22 cells

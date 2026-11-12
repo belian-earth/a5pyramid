@@ -37,6 +37,16 @@ view.
 - [`a5_write_pyramid_set_table()`](https://belian-earth.github.io/a5pyramid/reference/a5_write_pyramid_set_table.md)
   : Write a set's shard table
 
+## Partial rows
+
+Exact sums at coarse levels for parts built one at a time, merged into
+levels that span them.
+
+- [`a5_pyramid_partials()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_partials.md)
+  : Partial rows of a pyramid's mean vectors
+- [`a5_pyramid_merge_partials()`](https://belian-earth.github.io/a5pyramid/reference/a5_pyramid_merge_partials.md)
+  : Merge partial rows into a pyramid's coarse levels
+
 ## Configuration
 
 - [`a5pyramid_threads()`](https://belian-earth.github.io/a5pyramid/reference/a5pyramid_threads.md)

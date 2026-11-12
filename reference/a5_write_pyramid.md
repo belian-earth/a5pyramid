@@ -214,7 +214,7 @@ x <- data.frame(cell = cells, value = runif(length(cells)))
 path <- tempfile(fileext = ".parquet")
 a5_write_pyramid(x, path, types = c(value = "float32"), tile_size = 1000)
 a5_pyramid_info(path)
-#> ── a5pyramid file file293427d11930.parquet ─────────────────────────────────────
+#> ── a5pyramid file file29677cba0aed.parquet ─────────────────────────────────────
 #> Size: 13.2 KB (footer 4.8 KB)
 #> A5 index: 1.0
 #> Leaves: resolution 15, 1,024 cells
