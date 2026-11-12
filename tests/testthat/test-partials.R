@@ -10,20 +10,23 @@ partial_leaves <- function(seed = 1) {
   tibble::tibble(cell = cells, embedding = emb, n = as.double(1 + sample(0:8, length(cells), replace = TRUE)))
 }
 
-# The merged rows of one LOD as a data frame comparable with a5_pyramid()'s.
+# The merged rows of one LOD as a list comparable with a5_pyramid()'s, the
+# cells read from Arrow (never through R numerics) and put in hex order.
 merged_level <- function(m, lod) {
-  m <- as.data.frame(m)
-  m <- m[m$lod == lod, ]
-  m <- m[order(m$cell), ]
-  list(cell = a5R::a5_u64_to_hex(a5R::a5_cell_from_arrow(arrow::Array$create(m$cell, type = arrow::uint64()))),
-       ncell = as.integer(m$ncell), n = as.double(m$n),
-       codes = do.call(rbind, lapply(m$embedding, as.integer)))
+  m <- m$Filter(arrow::Array$create(as.integer(as.vector(m$lod)) == lod))
+  cell <- a5R::a5_u64_to_hex(a5R::a5_cell_from_arrow(m$cell))
+  o <- order(cell)
+  n <- if ("n" %in% names(m)) as.double(as.vector(m$n))[o]
+  list(cell = cell[o], ncell = as.integer(as.vector(m$ncell))[o], n = n,
+       codes = do.call(rbind, lapply(as.vector(m$embedding), as.integer))[o, , drop = FALSE])
 }
 
 built_level <- function(p, lod) {
   p <- p[p$lod == lod, ]
-  list(cell = a5R::a5_u64_to_hex(p$cell), ncell = as.integer(p$ncell), n = as.double(p$n),
-       codes = unname(p$embedding))
+  cell <- a5R::a5_u64_to_hex(p$cell)
+  o <- order(cell)
+  n <- if ("n" %in% names(p)) as.double(p$n)[o]
+  list(cell = cell[o], ncell = as.integer(p$ncell)[o], n = n, codes = unname(p$embedding)[o, , drop = FALSE])
 }
 
 test_that("merged partials of separate parts are the levels of one build", {
@@ -31,8 +34,8 @@ test_that("merged partials of separate parts are the levels of one build", {
   lods <- 10:12
   built <- a5_pyramid(x, embedding, lods = lods, reducers = c(embedding = "mean"), codecs = c(embedding = "aef"),
                       weights = "n", weights_type = "uint32")
-  by11 <- a5R::a5_cell_to_supercell(x$cell, 11)
-  part <- vctrs::vec_group_id(by11) %% 3L
+  # three parts, each a set of whole cells at 11 (so their coarse cells straddle)
+  part <- as.integer(factor(a5R::a5_u64_to_hex(a5R::a5_cell_to_supercell(x$cell, 11)))) %% 3L
   parts <- lapply(split(seq_len(nrow(x)), part), function(i) {
     a5_pyramid_partials(x[i, ], embedding, lods = lods, key_resolution = 8, weights = "n",
                         codecs = c(embedding = "aef"))
@@ -75,9 +78,7 @@ test_that("unweighted partials divide by the leaves", {
   built <- a5_pyramid(x, embedding, lods = 11, reducers = c(embedding = "mean"), codecs = c(embedding = "aef"))
   p <- a5_pyramid_partials(x, embedding, lods = 11, key_resolution = 8, codecs = c(embedding = "aef"))
   expect_false("n" %in% names(p))
-  m <- as.data.frame(a5_pyramid_merge_partials(p))
-  m <- m[order(m$cell), ]
-  expect_identical(do.call(rbind, lapply(m$embedding, as.integer)), unname(built$embedding[built$lod == 11, ]))
+  expect_identical(merged_level(a5_pyramid_merge_partials(p), 11), built_level(built, 11))
 })
 
 test_that("what does not merge is refused", {

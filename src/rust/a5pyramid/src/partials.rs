@@ -82,13 +82,21 @@ impl PartialsMeta {
             .map(|v| {
                 let ty = ColumnType::parse(&v.ty)?;
                 if !ty.is_byte() {
-                    return Err(invalid(format!("partials vector {:?} must be int8 or uint8, not {}", v.name, v.ty)));
+                    return Err(invalid(format!(
+                        "partials vector {:?} must be int8 or uint8, not {}",
+                        v.name, v.ty
+                    )));
                 }
                 if v.dim == 0 {
                     return Err(invalid(format!("partials vector {:?} has no elements", v.name)));
                 }
                 let codec = v.codec.as_deref().map(Codec::parse).transpose()?;
-                Ok(VecInfo { name: v.name.clone(), ty, dim: v.dim, codec })
+                Ok(VecInfo {
+                    name: v.name.clone(),
+                    ty,
+                    dim: v.dim,
+                    codec,
+                })
             })
             .collect()
     }
@@ -96,7 +104,12 @@ impl PartialsMeta {
     fn weights_spec(&self) -> Result<Option<WeightsSpec>> {
         self.weights
             .as_ref()
-            .map(|w| Ok(WeightsSpec { name: w.name.clone(), ty: ColumnType::parse(&w.ty)? }))
+            .map(|w| {
+                Ok(WeightsSpec {
+                    name: w.name.clone(),
+                    ty: ColumnType::parse(&w.ty)?,
+                })
+            })
             .transpose()
     }
 }
@@ -126,7 +139,10 @@ pub fn partials(leaves: Leaves, lods: &[i32], key_resolutions: &[i32], cancel: &
         return Err(invalid("no cells to take partials of"));
     }
     if n > u32::MAX as usize {
-        return Err(invalid(format!("{n} cells is more than a pyramid can hold ({})", u32::MAX)));
+        return Err(invalid(format!(
+            "{n} cells is more than a pyramid can hold ({})",
+            u32::MAX
+        )));
     }
     if let Some(c) = columns.first() {
         return Err(invalid(format!(
@@ -146,7 +162,9 @@ pub fn partials(leaves: Leaves, lods: &[i32], key_resolutions: &[i32], cancel: &
         )));
     }
     if weights.is_some() != weights_column.is_some() {
-        return Err(invalid("partials sum the weights into a column of their own: give its name with the weights"));
+        return Err(invalid(
+            "partials sum the weights into a column of their own: give its name with the weights",
+        ));
     }
     let weights = check_weights(weights, n)?;
     if let Some(w) = &weights {
@@ -284,7 +302,11 @@ pub fn partials(leaves: Leaves, lods: &[i32], key_resolutions: &[i32], cancel: &
     }
     for (v, sums) in vectors.iter().zip(out_sums) {
         let item = Arc::new(Field::new("element", DataType::Float64, false));
-        fields.push(Field::new(&v.spec.name, DataType::FixedSizeList(item.clone(), v.spec.dim as i32), false));
+        fields.push(Field::new(
+            &v.spec.name,
+            DataType::FixedSizeList(item.clone(), v.spec.dim as i32),
+            false,
+        ));
         arrays.push(Arc::new(FixedSizeListArray::try_new(
             item,
             v.spec.dim as i32,
@@ -378,10 +400,7 @@ impl PartialsMerge {
         let key_k = index(KEY_COLUMN, &DataType::UInt64)?;
         let cell_k = index(CELL_COLUMN, &DataType::UInt64)?;
         let ncell_k = index(NCELL_COLUMN, &DataType::UInt64)?;
-        let w_k = wspec
-            .as_ref()
-            .map(|w| index(&w.name, &DataType::Float64))
-            .transpose()?;
+        let w_k = wspec.as_ref().map(|w| index(&w.name, &DataType::Float64)).transpose()?;
         let vec_k: Vec<usize> = vecs
             .iter()
             .map(|v| {
@@ -389,7 +408,9 @@ impl PartialsMerge {
                     .index_of(&v.name)
                     .map_err(|_| invalid(format!("the partials have no column {:?}", v.name)))?;
                 match schema.field(k).data_type() {
-                    DataType::FixedSizeList(f, d) if *d as usize == v.dim && f.data_type() == &DataType::Float64 => Ok(k),
+                    DataType::FixedSizeList(f, d) if *d as usize == v.dim && f.data_type() == &DataType::Float64 => {
+                        Ok(k)
+                    }
                     other => Err(invalid(format!(
                         "partials column {:?} must be a fixed-size list of {} float64, not {other}",
                         v.name, v.dim
@@ -428,7 +449,9 @@ impl PartialsMerge {
         }
         let names: Vec<&String> = batch.schema_ref().fields().iter().map(|f| f.name()).collect();
         if names.len() != self.names.len() || names.iter().zip(&self.names).any(|(a, b)| *a != b) {
-            return Err(invalid("a batch of partials whose columns differ from the merge's schema"));
+            return Err(invalid(
+                "a batch of partials whose columns differ from the merge's schema",
+            ));
         }
         let mut ks = vec![self.lod_k, self.key_k, self.cell_k, self.ncell_k];
         ks.extend(self.w_k);
@@ -459,9 +482,8 @@ impl PartialsMerge {
         for ((v, &k), sums) in self.vecs.iter().zip(&self.vec_k).zip(acc.sums.iter_mut()) {
             let list = batch.column(k).as_fixed_size_list();
             let values = list.values().as_primitive::<Float64Type>().values();
-            let base = list.offset() * v.dim;
             for &i in &rows {
-                let s = base + i * v.dim;
+                let s = list.value_offset_at(i);
                 sums.extend_from_slice(&values[s..s + v.dim]);
             }
         }
@@ -480,7 +502,12 @@ impl PartialsMerge {
 }
 
 /// [`PartialsMerge`] over `batches` of partials tables of `schema`.
-pub fn merge_partials<I>(schema: &Schema, batches: I, keys: Option<&HashSet<u64>>, cancel: &Cancel) -> Result<RecordBatch>
+pub fn merge_partials<I>(
+    schema: &Schema,
+    batches: I,
+    keys: Option<&HashSet<u64>>,
+    cancel: &Cancel,
+) -> Result<RecordBatch>
 where
     I: IntoIterator<Item = Result<RecordBatch>>,
 {
@@ -585,7 +612,9 @@ fn merge_rows(
         Arc::new(UInt8Array::from(lod)),
         Arc::new(UInt64Array::from(key)),
         Arc::new(UInt64Array::from(cell)),
-        Arc::new(UInt32Array::from(ncell64.iter().map(|&c| c as u32).collect::<Vec<u32>>())),
+        Arc::new(UInt32Array::from(
+            ncell64.iter().map(|&c| c as u32).collect::<Vec<u32>>(),
+        )),
     ];
     if let Some(w) = wspec {
         fields.push(Field::new(&w.name, w.ty.data_type(), false));
@@ -624,7 +653,11 @@ fn merge_rows(
             ColumnType::Int8 => Arc::new(Int8Array::from(codes.into_iter().map(|b| b as i8).collect::<Vec<i8>>())),
             _ => Arc::new(UInt8Array::from(codes)),
         };
-        fields.push(Field::new(&v.name, DataType::FixedSizeList(item.clone(), dim as i32), false));
+        fields.push(Field::new(
+            &v.name,
+            DataType::FixedSizeList(item.clone(), dim as i32),
+            false,
+        ));
         arrays.push(Arc::new(FixedSizeListArray::try_new(item, dim as i32, values, None)?));
         cancel.check()?;
     }
@@ -662,14 +695,20 @@ mod tests {
             columns: Vec::new(),
             vectors: vec![v],
             weights: weighted.then_some(w),
-            weights_column: weighted.then(|| WeightsSpec { name: "n".into(), ty: ColumnType::UInt32 }),
+            weights_column: weighted.then(|| WeightsSpec {
+                name: "n".into(),
+                ty: ColumnType::UInt32,
+            }),
         }
     }
 
     fn subset(l: &Leaves, keep: &[usize]) -> Leaves {
         let dim = l.vectors[0].spec.dim;
         let mut v = l.vectors[0].clone();
-        v.values = keep.iter().flat_map(|&i| l.vectors[0].values[i * dim..(i + 1) * dim].to_vec()).collect();
+        v.values = keep
+            .iter()
+            .flat_map(|&i| l.vectors[0].values[i * dim..(i + 1) * dim].to_vec())
+            .collect();
         Leaves {
             cells: keep.iter().map(|&i| l.cells[i]).collect(),
             columns: Vec::new(),
@@ -733,7 +772,9 @@ mod tests {
                     (0..cells.len()).filter(|&i| by8[i] < pivot).collect(),
                     (0..cells.len()).filter(|&i| by8[i] >= pivot).collect(),
                 ],
-                (0..3).map(|r| (0..cells.len()).filter(|&i| i % 3 == r).collect()).collect(),
+                (0..3)
+                    .map(|r| (0..cells.len()).filter(|&i| i % 3 == r).collect())
+                    .collect(),
             ];
             for split in splits {
                 let parts: Vec<RecordBatch> = split
@@ -742,7 +783,11 @@ mod tests {
                     .collect();
                 let m = merged(parts);
                 for &lod in &lods {
-                    assert_eq!(rows_at(&m, lod as u8), built_at(&built, lod), "lod {lod}, weighted {weighted}");
+                    assert_eq!(
+                        rows_at(&m, lod as u8),
+                        built_at(&built, lod),
+                        "lod {lod}, weighted {weighted}"
+                    );
                 }
             }
         }

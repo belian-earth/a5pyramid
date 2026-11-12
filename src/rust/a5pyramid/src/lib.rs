@@ -62,8 +62,8 @@ pub use meta::{
     META_KEY,
 };
 pub use partials::{
-    merge_partials, partials, partials_meta, PartialsMerge, PartialsMeta, PartialsVector, PartialsWeights, KEY_COLUMN, PARTIALS_META_KEY,
-    PARTIALS_VERSION,
+    merge_partials, partials, partials_meta, PartialsMerge, PartialsMeta, PartialsVector, PartialsWeights, KEY_COLUMN,
+    PARTIALS_META_KEY, PARTIALS_VERSION,
 };
 pub use read::PyramidFile;
 pub use set::{

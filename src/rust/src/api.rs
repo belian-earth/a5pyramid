@@ -10,10 +10,10 @@ use arrow_schema::DataType;
 use extendr_api::prelude::*;
 
 use a5pyramid::{
-    build, default_tiers, partials, write_parquet, write_set, write_set_table, Bbox, Codec, Column, ColumnSpec, ColumnType,
-    Compression, Leaves, ParquetOptions, Pyramid, PyramidFile, Reducer, SetIndexFormat, SetMeta, SetOptions,
-    ShardEntry, ShardMeta, Tier, TileOptions, TiledPyramid, VectorColumn, VectorStorage, WeightsSpec,
-    PartialsMerge,
+    build, default_tiers, partials, write_parquet, write_set, write_set_table, Bbox, Codec, Column, ColumnSpec,
+    ColumnType, Compression, Leaves, ParquetOptions, PartialsMerge, Pyramid, PyramidFile, Reducer, SetIndexFormat,
+    SetMeta, SetOptions, ShardEntry, ShardMeta, Tier, TileOptions, TiledPyramid, VectorColumn, VectorStorage,
+    WeightsSpec,
 };
 use arrow_array::ffi_stream::{FFI_ArrowArrayStream, RecordBatchStreamReader};
 
@@ -1176,7 +1176,9 @@ fn batch_stream(batch: RecordBatch) -> Robj {
 #[extendr]
 fn a5pyramid_partials_rs(leaves: Robj, lods: Vec<i32>, key_resolutions: Vec<i32>, threads: i32) -> Result<Robj> {
     let leaves = take_leaves(&leaves)?;
-    let batch = run(threads as usize, move |cancel| partials(leaves, &lods, &key_resolutions, cancel))?;
+    let batch = run(threads as usize, move |cancel| {
+        partials(leaves, &lods, &key_resolutions, cancel)
+    })?;
     Ok(batch_stream(batch))
 }
 
