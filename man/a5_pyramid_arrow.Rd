@@ -15,6 +15,8 @@ a5_pyramid_arrow(
   rep_sd = NULL,
   codecs = NULL,
   tile_size = 4096L,
+  storage = NULL,
+  weights_type = NULL,
   metadata = NULL,
   threads = NULL
 )
@@ -71,6 +73,19 @@ Default \code{NULL}: every column stores its values.}
 \item{tile_size}{The most rows in a tile. Larger tiles mean fewer
 requests and a smaller footer; smaller tiles mean less data fetched
 outside the view. Default: 4096.}
+
+\item{storage}{Named character vector of how to store vector columns:
+\code{"fixed_binary"} (default), one fixed-length binary value a row, the
+smallest footer and the fastest decode; or \code{"list"}, a Parquet list of
+the elements, dictionary encoded, which engines such as DuckDB read as
+an array column (\code{TINYINT[]}), as the a5embeddings store keeps its
+embeddings (format version 4). Such as \code{c(embedding = "list")}.}
+
+\item{weights_type}{\code{NULL} (default), or a storage type (see "Column
+types") in which to keep each row's summed \code{weights} at every level, as
+a column named as the weights, beside the value columns and not one of
+them: a reader that merges rows of one cell weights them by it (format
+version 4 in a file). Needs \code{weights}.}
 
 \item{metadata}{Named character vector or list of strings to add to the
 file's key-value metadata, such as a renderer's settings as JSON. The

@@ -338,6 +338,53 @@ pub struct VectorSpec {
     /// (1 where that is 0 or undefined), a value fixes it. In a built
     /// pyramid, the value used. Always `None` for a `Mean` vector.
     pub sd: Option<f64>,
+    /// How the file stores it: fixed-length binary (the default) or a list
+    /// of `dim` elements (format version 4).
+    pub storage: VectorStorage,
+}
+
+/// How a vector column is stored in Parquet and Arrow.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VectorStorage {
+    /// `FIXED_LEN_BYTE_ARRAY` of `dim` bytes (Arrow `fixed_size_binary`):
+    /// one plain value a row, the smallest footer and the fastest decode.
+    #[default]
+    FixedBinary,
+    /// A Parquet `LIST` of `dim` elements (Arrow `fixed_size_list`, read
+    /// back as `list`), dictionary encoded: the layout engines such as
+    /// DuckDB read as an array column (`TINYINT[]`), as the a5embeddings
+    /// store keeps its embeddings.
+    List,
+}
+
+impl VectorStorage {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s {
+            "fixed_binary" => Ok(Self::FixedBinary),
+            "list" => Ok(Self::List),
+            other => Err(invalid(format!(
+                "unknown vector storage {other:?}; expected fixed_binary or list"
+            ))),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FixedBinary => "fixed_binary",
+            Self::List => "list",
+        }
+    }
+}
+
+/// A column holding each row's summed leaf weights, such as the AEF pixels
+/// under a cell (format version 4). It is stored beside the value columns,
+/// is not one of them, and is not drawn; a reader that merges rows of one
+/// cell weights them by it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WeightsSpec {
+    pub name: String,
+    /// The sums' type: integer sums round half to even and clamp.
+    pub ty: ColumnType,
 }
 
 /// A vector column of the leaves: `dim` elements per leaf, row by row, as
@@ -359,9 +406,16 @@ impl VectorColumn {
                 reducer: Reducer::RepChild,
                 codec: None,
                 sd: None,
+                storage: VectorStorage::FixedBinary,
             },
             values,
         }
+    }
+
+    /// The column stored as `storage`.
+    pub fn with_storage(mut self, storage: VectorStorage) -> Self {
+        self.spec.storage = storage;
+        self
     }
 
     /// The column with its `RepChild` scale fixed at `sd`.

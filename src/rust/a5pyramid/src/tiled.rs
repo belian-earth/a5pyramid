@@ -19,8 +19,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use arrow_array::{
-    ArrayRef, FixedSizeBinaryArray, Float32Array, Float64Array, Int16Array, Int32Array, Int8Array, RecordBatch,
-    RecordBatchReader, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    ArrayRef, FixedSizeBinaryArray, FixedSizeListArray, Float32Array, Float64Array, Int16Array, Int32Array, Int8Array,
+    RecordBatch, RecordBatchReader, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow_buffer::{Buffer, NullBuffer};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
@@ -29,14 +29,14 @@ use rayon::prelude::*;
 use crate::bbox::{cells_bbox, Bbox};
 use crate::build::Pyramid;
 use crate::cancel::Cancel;
-use crate::column::{ColumnSpec, ColumnType, VectorSpec};
+use crate::column::{ColumnSpec, ColumnType, VectorSpec, VectorStorage, WeightsSpec};
 use crate::error::{invalid, Error, Result};
 use crate::meta::{
     column_meta, version_with, LevelMeta, PyramidMeta, ShardMeta, A5_INDEX, A5_INDEX_KEY, META_KEY, SHARD_FILE_VERSION,
     SINGLE_FILE_VERSION,
 };
 use crate::tiles::plan_tiles;
-use crate::{CELL_COLUMN, LOD_COLUMN, NCELL_COLUMN};
+use crate::{CELL_COLUMN, LOD_COLUMN, NCELL_COLUMN, OWNER_COLUMN};
 
 /// Metadata keys a caller may not set.
 const RESERVED_KEYS: [&str; 3] = [META_KEY, A5_INDEX_KEY, "ARROW:schema"];
@@ -64,6 +64,16 @@ pub struct TileOptions {
     /// ([`crate::write_set`]): the index records it, takes format version 2,
     /// and boxes every tile rather than only the finest level's.
     pub shard: Option<ShardMeta>,
+    /// A shard only: add an `owner` column, each row cell's supercell at the
+    /// shard resolution, for a shard whose rows may be partial (format
+    /// version 4), such as a partition's level built from its own leaves.
+    pub owner: bool,
+    /// Whether to store the `lod` column (default). A pyramid of one level
+    /// may leave it out (format version 4): the index gives the level.
+    pub lod_column: bool,
+    /// Whether to store the `ncell` column (default). A pyramid whose rows
+    /// are all leaves may leave it out (format version 4): each counts 1.
+    pub ncell_column: bool,
 }
 
 impl Default for TileOptions {
@@ -74,6 +84,9 @@ impl Default for TileOptions {
             generator: format!("a5pyramid {}", env!("CARGO_PKG_VERSION")),
             metadata: Vec::new(),
             shard: None,
+            owner: false,
+            lod_column: true,
+            ncell_column: true,
         }
     }
 }
@@ -88,6 +101,16 @@ pub struct TiledPyramid {
     meta: PyramidMeta,
     metadata: Vec<(String, String)>,
     schema: SchemaRef,
+    layout: Layout,
+}
+
+/// Which of the optional columns a pyramid stores, and for `owner` the
+/// shard resolution it is computed at.
+#[derive(Clone, Copy, Debug)]
+struct Layout {
+    lod: bool,
+    ncell: bool,
+    owner: Option<i32>,
 }
 
 /// A tile: rows `rows` of level `level` of the pyramid.
@@ -123,6 +146,20 @@ impl TiledPyramid {
 
         if opts.shard.is_some() && pyramid.n_rows() == 0 {
             return Err(invalid("a shard must hold at least one cell"));
+        }
+        if opts.owner && opts.shard.is_none() {
+            return Err(invalid("an owner column names each row's shard: only a shard has one"));
+        }
+        if !opts.lod_column && pyramid.levels.len() != 1 {
+            return Err(invalid(format!(
+                "the lod column can be left out only of a pyramid of one level, not {}",
+                pyramid.levels.len()
+            )));
+        }
+        if !opts.ncell_column && pyramid.levels.iter().any(|l| l.ncell.iter().any(|&c| c != 1)) {
+            return Err(invalid(
+                "the ncell column can be left out only where every row is one leaf",
+            ));
         }
 
         let mut tiles = Vec::new();
@@ -168,13 +205,16 @@ impl TiledPyramid {
             Some(_) => (SHARD_FILE_VERSION, &all_boxes),
         };
         let several = row_groups.iter().any(|g| g.len() > 1);
+        let v4 = several || pyramid.weights.is_some() || opts.owner || !opts.lod_column || !opts.ncell_column;
         let meta = PyramidMeta {
-            format_version: version_with(&pyramid.vectors, several, format_version),
+            format_version: version_with(&pyramid.vectors, v4, format_version),
             generator: opts.generator.clone(),
             a5_crate: crate::A5_CRATE_VERSION.to_string(),
             data_resolution: pyramid.data_resolution,
             tile_size: opts.tile_size,
             row_group_size: several.then_some(group_size),
+            weights: pyramid.weights.as_ref().map(Into::into),
+            owner: opts.owner,
             bbox: Bbox::covering(boxed).unwrap_or(Bbox::WORLD).to_array(),
             columns: column_meta(&pyramid.columns, &pyramid.vectors),
             levels,
@@ -188,7 +228,20 @@ impl TiledPyramid {
         ];
         metadata.extend(opts.metadata.iter().cloned());
         let map: HashMap<String, String> = metadata.iter().cloned().collect();
-        let schema = Arc::new(Schema::new(fields(&pyramid.columns, &pyramid.vectors)).with_metadata(map));
+        let layout = Layout {
+            lod: opts.lod_column,
+            ncell: opts.ncell_column,
+            owner: opts.shard.as_ref().filter(|_| opts.owner).map(|s| s.resolution),
+        };
+        let schema = Arc::new(
+            Schema::new(fields(
+                &pyramid.columns,
+                &pyramid.vectors,
+                pyramid.weights.as_ref(),
+                layout,
+            ))
+            .with_metadata(map),
+        );
         Ok(Self {
             pyramid,
             tiles,
@@ -196,6 +249,7 @@ impl TiledPyramid {
             meta,
             metadata,
             schema,
+            layout,
         })
     }
 
@@ -250,11 +304,25 @@ impl TiledPyramid {
         let level = &self.pyramid.levels[tile.level];
         let r = tile.rows.clone();
         let lod = u8::try_from(level.lod).map_err(|_| invalid(format!("LOD {} out of range", level.lod)))?;
-        let mut arrays: Vec<ArrayRef> = vec![
-            Arc::new(UInt64Array::from(level.cells[r.clone()].to_vec())),
-            Arc::new(UInt8Array::from(vec![lod; r.len()])),
-            Arc::new(UInt32Array::from(level.ncell[r.clone()].to_vec())),
-        ];
+        let cells = &level.cells[r.clone()];
+        let mut arrays: Vec<ArrayRef> = vec![Arc::new(UInt64Array::from(cells.to_vec()))];
+        if self.layout.lod {
+            arrays.push(Arc::new(UInt8Array::from(vec![lod; r.len()])));
+        }
+        if self.layout.ncell {
+            arrays.push(Arc::new(UInt32Array::from(level.ncell[r.clone()].to_vec())));
+        }
+        if let Some(res) = self.layout.owner {
+            let owner = cells
+                .iter()
+                .map(|&c| a5::cell_to_supercell(c, res))
+                .collect::<std::result::Result<Vec<u64>, _>>()
+                .map_err(Error::A5)?;
+            arrays.push(Arc::new(UInt64Array::from(owner)));
+        }
+        if let Some(w) = &self.pyramid.weights {
+            arrays.push(value_array(w.ty, &level.weights[r.clone()]));
+        }
         arrays.extend(
             self.pyramid
                 .columns
@@ -264,11 +332,7 @@ impl TiledPyramid {
         );
         for (spec, v) in self.pyramid.vectors.iter().zip(&level.vectors) {
             let bytes = &v[r.start * spec.dim..r.end * spec.dim];
-            arrays.push(Arc::new(FixedSizeBinaryArray::try_new(
-                spec.dim as i32,
-                Buffer::from(bytes.to_vec()),
-                None,
-            )?));
+            arrays.push(vector_array(spec, bytes)?);
         }
         Ok(RecordBatch::try_new(Arc::clone(&self.schema), arrays)?)
     }
@@ -331,21 +395,60 @@ impl RecordBatchReader for TileReader {
     }
 }
 
-/// The columns: `cell`, `lod`, `ncell`, the value columns (nullable), then
-/// the vector columns as fixed-length binary of `dim` bytes.
-fn fields(columns: &[ColumnSpec], vectors: &[VectorSpec]) -> Vec<Field> {
-    let mut fields = vec![
-        Field::new(CELL_COLUMN, DataType::UInt64, false),
-        Field::new(LOD_COLUMN, DataType::UInt8, false),
-        Field::new(NCELL_COLUMN, DataType::UInt32, false),
-    ];
+/// The columns: `cell`, `lod`, `ncell`, `owner` and the weights where
+/// stored, the value columns (nullable), then the vector columns as
+/// fixed-length binary of `dim` bytes or a fixed-size list of `dim`
+/// elements.
+fn fields(columns: &[ColumnSpec], vectors: &[VectorSpec], weights: Option<&WeightsSpec>, layout: Layout) -> Vec<Field> {
+    let mut fields = vec![Field::new(CELL_COLUMN, DataType::UInt64, false)];
+    if layout.lod {
+        fields.push(Field::new(LOD_COLUMN, DataType::UInt8, false));
+    }
+    if layout.ncell {
+        fields.push(Field::new(NCELL_COLUMN, DataType::UInt32, false));
+    }
+    if layout.owner.is_some() {
+        fields.push(Field::new(OWNER_COLUMN, DataType::UInt64, false));
+    }
+    if let Some(w) = weights {
+        fields.push(Field::new(&w.name, w.ty.data_type(), false));
+    }
     fields.extend(columns.iter().map(|c| Field::new(&c.name, c.ty.data_type(), true)));
-    fields.extend(
-        vectors
-            .iter()
-            .map(|v| Field::new(&v.name, DataType::FixedSizeBinary(v.dim as i32), false)),
-    );
+    fields.extend(vectors.iter().map(|v| Field::new(&v.name, vector_type(v), false)));
     fields
+}
+
+/// The Arrow type of a vector column.
+pub(crate) fn vector_type(v: &VectorSpec) -> DataType {
+    match v.storage {
+        VectorStorage::FixedBinary => DataType::FixedSizeBinary(v.dim as i32),
+        VectorStorage::List => DataType::FixedSizeList(Arc::new(list_item(v.ty)), v.dim as i32),
+    }
+}
+
+/// The element of a list vector: never null.
+fn list_item(ty: ColumnType) -> Field {
+    Field::new("element", ty.data_type(), false)
+}
+
+/// A vector column's rows as an Arrow array of its storage.
+fn vector_array(spec: &VectorSpec, bytes: &[u8]) -> Result<ArrayRef> {
+    let dim = spec.dim as i32;
+    Ok(match spec.storage {
+        VectorStorage::FixedBinary => Arc::new(FixedSizeBinaryArray::try_new(dim, Buffer::from(bytes.to_vec()), None)?),
+        VectorStorage::List => {
+            let values: ArrayRef = match spec.ty {
+                ColumnType::Int8 => Arc::new(Int8Array::from(bytes.iter().map(|&b| b as i8).collect::<Vec<i8>>())),
+                _ => Arc::new(UInt8Array::from(bytes.to_vec())),
+            };
+            Arc::new(FixedSizeListArray::try_new(
+                Arc::new(list_item(spec.ty)),
+                dim,
+                values,
+                None,
+            )?)
+        }
+    })
 }
 
 /// Values (NaN where missing) as an Arrow array of `ty`, nulls where

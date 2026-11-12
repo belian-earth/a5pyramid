@@ -17,7 +17,9 @@ a5_read_pyramid(src, lod = NULL, bbox = NULL)
 }
 \value{
 A tibble with the columns of \code{\link[=a5_pyramid]{a5_pyramid()}}, in file order:
-ascending LOD, then cell id.
+ascending LOD, then cell id; with an \code{owner} column (an
+\link[a5R:a5_cell]{a5R::a5_cell}) and the weights column where the file has them. A file
+without \code{lod} or \code{ncell} columns gives its level and 1.
 }
 \description{
 Reads the rows of the tiles at \code{lod} whose bounding boxes meet \code{bbox},

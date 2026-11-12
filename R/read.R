@@ -20,13 +20,18 @@
 #'   - `row_group_size`: in a file whose row groups hold several tiles
 #'     (format version 4), the most rows in a row group; `NA` where each
 #'     row group is one tile. `row_groups`: the number of row groups.
+#'   - `weights`: the weights column (a list of its `name` and `type`;
+#'     format version 4), or `NULL`.
+#'   - `owner`: whether the file has an `owner` column, a shard whose rows
+#'     may be partial (format version 4; see [a5_write_pyramid_level()]).
 #'   - `bbox`: `c(xmin, ymin, xmax, ymax)` of the leaves.
 #'   - `columns`: a tibble of the value columns' `name`, `type`,
 #'     `reducer`, `codec` (see [a5_pyramid()]; `NA` for a column that
 #'     stores its values) and `sd`, the standard deviation that scaled a
 #'     `"rep_child"` column (1 where the leaves' standard deviation is 0 or
-#'     undefined; `NA` for other reducers and older files), and `dim`, the
-#'     elements per cell of a vector column (`NA` for scalar columns).
+#'     undefined; `NA` for other reducers and older files), `dim`, the
+#'     elements per cell of a vector column (`NA` for scalar columns), and
+#'     `storage`, a vector column's storage (`"fixed_binary"` or `"list"`).
 #'   - `levels`: a tibble of each level's `lod`, `rows` and number of
 #'     `tiles`.
 #'   - `tiles`: a tibble with one row per tile: `tile` (its 0-based index),
@@ -73,6 +78,8 @@ a5_pyramid_info <- function(src) {
       tile_size = r$tile_size,
       row_group_size = r$row_group_size,
       row_groups = r$n_row_groups,
+      weights = r$weights,
+      owner = r$owner,
       bbox = c(xmin = bbox_lon$xmin, ymin = r$bbox[2], xmax = bbox_lon$xmax, ymax = r$bbox[4]),
       columns = tibble::new_tibble(r$columns, nrow = length(r$columns$name)),
       levels = tibble::tibble(
@@ -164,7 +171,9 @@ format_bytes <- function(b) {
 #'   ymax)` in WGS 84 degrees. For a box across the antimeridian give
 #'   `xmin > xmax`, such as `c(179, -1, -179, 1)`.
 #' @returns A tibble with the columns of [a5_pyramid()], in file order:
-#'   ascending LOD, then cell id.
+#'   ascending LOD, then cell id; with an `owner` column (an
+#'   [a5R::a5_cell]) and the weights column where the file has them. A file
+#'   without `lod` or `ncell` columns gives its level and 1.
 #' @seealso [a5_pyramid_info()] for the file's levels and tiles.
 #' @export
 #' @examples

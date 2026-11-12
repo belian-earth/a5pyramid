@@ -26,10 +26,14 @@ elements per cell of a vector column (\code{NA} for scalar columns).
 \item \code{tiers}: a tibble with one row per tier: \code{tier} (from 0), \code{lod_min},
 \code{lod_max}, \code{shard_resolution}, \code{tile_size}, \code{row_group_size} (\code{NA}
 for one tile a row group), and its \code{shards}, \code{rows} and \code{bytes}.
+\item \code{weights}: the weights column every shard stores (a list of its
+\code{name} and \code{type}), or \code{NULL}.
 \item \code{shards}: a tibble with one row per shard: \code{tier}, \code{cell} (the shard
-cell, an \link[a5R:a5_cell]{a5R::a5_cell}), \code{path} (relative to the set's directory),
-\code{rows}, \code{tiles}, \code{bytes}, \code{footer_bytes} (what a reader fetches to
-open it) and \code{xmin}, \code{ymin}, \code{xmax}, \code{ymax}.
+cell, an \link[a5R:a5_cell]{a5R::a5_cell}), \code{path} (relative to the set's directory;
+\code{NA} for a shard listed as empty, with no file), \code{rows}, \code{tiles},
+\code{bytes}, \code{footer_bytes} (what a reader fetches to open it) and
+\code{xmin}, \code{ymin}, \code{xmax}, \code{ymax}; for a shard table, its writer's own
+columns follow, read with arrow where it is installed.
 \item \code{metadata}: the set's metadata, a named character vector.
 }
 }

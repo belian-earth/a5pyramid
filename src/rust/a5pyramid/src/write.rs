@@ -7,12 +7,14 @@
 //! the file's key-value metadata. Chunk statistics are kept for `cell` and
 //! `lod` only, so engines such as DuckDB can skip row groups by LOD or cell
 //! id while the footer, which a browser reads before anything else, stays
-//! small. Dictionary encoding is off except for `lod`, which is constant in
-//! a row group. `cell` and `ncell` are delta encoded: a tile's ids are
-//! sorted and close together, and `ncell` is constant at the leaves, so
-//! delta encoding takes `cell` from 8 bytes per row to about 3. Data pages
-//! are version 1: version 2 pages leave repetition and definition levels
-//! uncompressed, which costs a list column about 7%.
+//! small. Dictionary encoding is off except for `lod` (constant in a row
+//! group), `owner` and the weights (few distinct values) and list vectors
+//! (dictionaries of their elements: 55 bytes a 64-element row under zstd,
+//! against about 77 plain). `cell` and `ncell` are delta encoded: a tile's
+//! ids are sorted and close together, and `ncell` is constant at the
+//! leaves, so delta encoding takes `cell` from 8 bytes per row to about 3.
+//! Data pages are version 1: version 2 pages leave repetition and
+//! definition levels uncompressed, which costs a list column about 7%.
 //!
 //! In a file of row groups of several tiles the page index is written: the
 //! offset index locates each tile's page in every column chunk, and the
@@ -35,9 +37,10 @@ use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersi
 use parquet::schema::types::ColumnPath;
 
 use crate::cancel::Cancel;
+use crate::column::VectorStorage;
 use crate::error::{invalid, Error, Result};
 use crate::tiled::TiledPyramid;
-use crate::{CELL_COLUMN, LOD_COLUMN, NCELL_COLUMN};
+use crate::{CELL_COLUMN, LOD_COLUMN, NCELL_COLUMN, OWNER_COLUMN};
 
 /// Parquet compression codec. Snappy is the default: hyparquet decodes it
 /// without extra libraries, where zstd needs `hyparquet-compressors`.
@@ -61,7 +64,7 @@ impl Compression {
         }
     }
 
-    fn to_parquet(self) -> PqCompression {
+    pub(crate) fn to_parquet(self) -> PqCompression {
         match self {
             Self::Snappy => PqCompression::SNAPPY,
             Self::Zstd => PqCompression::ZSTD(ZstdLevel::default()),
@@ -126,15 +129,43 @@ const PAGE_BYTES: usize = 1 << 30;
 
 /// Writer properties; `pages` is the tile size of a file whose row groups
 /// hold several tiles, `None` for one tile a row group.
-fn properties(opts: &ParquetOptions, kv: Vec<KeyValue>, pages: Option<usize>) -> WriterProperties {
+fn properties(
+    tiled: &TiledPyramid,
+    opts: &ParquetOptions,
+    kv: Vec<KeyValue>,
+    pages: Option<usize>,
+) -> WriterProperties {
     let cell = ColumnPath::from(CELL_COLUMN);
     let lod = ColumnPath::from(LOD_COLUMN);
     let ncell = ColumnPath::from(NCELL_COLUMN);
-    let b = WriterProperties::builder()
+    let p = tiled.pyramid();
+    // the leaf column of each list vector: <name>.list.element
+    let lists: Vec<ColumnPath> = p
+        .vectors
+        .iter()
+        .filter(|v| v.storage == VectorStorage::List)
+        .map(|v| ColumnPath::new(vec![v.name.clone(), "list".into(), "element".into()]))
+        .collect();
+    let mut dictionary = vec![lod.clone(), ColumnPath::from(OWNER_COLUMN)];
+    dictionary.extend(p.weights.iter().map(|w| ColumnPath::from(w.name.as_str())));
+    dictionary.extend(lists.iter().cloned());
+    let mut b = WriterProperties::builder()
         .set_writer_version(WriterVersion::PARQUET_1_0)
         .set_compression(opts.compression.to_parquet())
-        .set_dictionary_enabled(false)
-        .set_column_dictionary_enabled(lod.clone(), true)
+        .set_dictionary_enabled(false);
+    for c in dictionary {
+        b = b.set_column_dictionary_enabled(c, true);
+    }
+    // a page boundary falls between write calls of tile_size rows: for a
+    // list, as many levels as its elements
+    let levels_per_row = p
+        .vectors
+        .iter()
+        .filter(|v| v.storage == VectorStorage::List)
+        .map(|v| v.dim)
+        .max()
+        .unwrap_or(1);
+    let b = b
         .set_column_encoding(cell.clone(), Encoding::DELTA_BINARY_PACKED)
         .set_column_encoding(ncell, Encoding::DELTA_BINARY_PACKED)
         .set_statistics_enabled(EnabledStatistics::None)
@@ -153,7 +184,7 @@ fn properties(opts: &ParquetOptions, kv: Vec<KeyValue>, pages: Option<usize>) ->
         Some(tile_size) => b
             .set_column_statistics_enabled(cell, EnabledStatistics::Page)
             .set_offset_index_disabled(false)
-            .set_write_batch_size(tile_size)
+            .set_write_batch_size(tile_size * levels_per_row)
             .set_data_page_row_count_limit(tile_size)
             .set_data_page_size_limit(PAGE_BYTES)
             .set_dictionary_page_size_limit(PAGE_BYTES),
@@ -173,7 +204,7 @@ fn write_file(tiled: &TiledPyramid, opts: &ParquetOptions, tmp: &Path, cancel: &
     // metadata (the index) as schema metadata
     let pages = tiled.meta().row_group_size.map(|_| tiled.meta().tile_size);
     let options = ArrowWriterOptions::new()
-        .with_properties(properties(opts, kv, pages))
+        .with_properties(properties(tiled, opts, kv, pages))
         .with_skip_arrow_metadata(true);
     let mut writer = ArrowWriter::try_new_with_options(file, tiled.schema(), options)?;
     for group in tiled.row_groups() {

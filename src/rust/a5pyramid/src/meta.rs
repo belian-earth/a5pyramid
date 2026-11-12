@@ -27,9 +27,11 @@ pub(crate) const SINGLE_FILE_VERSION: u32 = 1;
 pub(crate) const SHARD_FILE_VERSION: u32 = 2;
 /// The version of a file or set with a vector column, fixed as the others.
 pub(crate) const VECTOR_FILE_VERSION: u32 = 3;
-/// The version of a file with a row group of several tiles, and of a set
-/// with such a shard, fixed as the others.
-pub(crate) const ROW_GROUP_FILE_VERSION: u32 = 4;
+/// The version of a file using any of version 4's features (row groups of
+/// several tiles, list vectors, a weights column, an `owner` column, or no
+/// `lod` or `ncell` column), and of a set with such a shard or a Parquet
+/// index, fixed as the others.
+pub(crate) const VERSION_4: u32 = 4;
 
 /// The index: what the levels are, which tiles hold each, and what area
 /// each tile covers. A tile is one record batch in Arrow and, in a Parquet
@@ -54,6 +56,14 @@ pub struct PyramidMeta {
     /// Absent where every row group is one tile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row_group_size: Option<usize>,
+    /// Version 4: the column of each row's summed leaf weights, which is
+    /// not a value column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weights: Option<WeightsMeta>,
+    /// Version 4, shards only: the file has an `owner` column, and its rows
+    /// may be partial (see FORMAT.md, "Partial rows").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner: bool,
     /// `[west, south, east, north]` (`west > east` across the antimeridian):
     /// in a single file the box of the leaves, in a shard the box of every
     /// tile, coarse cells included.
@@ -94,6 +104,7 @@ pub(crate) fn column_meta(columns: &[crate::ColumnSpec], vectors: &[crate::Vecto
         codec: c.codec.map(|k| k.as_str().to_string()),
         sd: c.sd,
         dim: None,
+        storage: None,
     });
     let vecs = vectors.iter().map(|v| ColumnMeta {
         name: v.name.clone(),
@@ -102,15 +113,33 @@ pub(crate) fn column_meta(columns: &[crate::ColumnSpec], vectors: &[crate::Vecto
         codec: v.codec.map(|k| k.as_str().to_string()),
         sd: v.sd,
         dim: Some(v.dim),
+        storage: (v.storage == crate::VectorStorage::List).then(|| "list".to_string()),
     });
     scalars.chain(vecs).collect()
 }
 
+/// The weights column as the index records it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct WeightsMeta {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+}
+
+impl From<&crate::WeightsSpec> for WeightsMeta {
+    fn from(w: &crate::WeightsSpec) -> Self {
+        Self {
+            name: w.name.clone(),
+            ty: w.ty.as_str().to_string(),
+        }
+    }
+}
+
 /// The format version a file or set records over `base`, its version
-/// without vector columns and row groups of several tiles.
-pub(crate) fn version_with(vectors: &[crate::VectorSpec], row_groups_of_tiles: bool, base: u32) -> u32 {
-    if row_groups_of_tiles {
-        ROW_GROUP_FILE_VERSION
+/// without vector columns and version 4's features (`v4`).
+pub(crate) fn version_with(vectors: &[crate::VectorSpec], v4: bool, base: u32) -> u32 {
+    if v4 || vectors.iter().any(|v| v.storage == crate::VectorStorage::List) {
+        VERSION_4
     } else if !vectors.is_empty() {
         VECTOR_FILE_VERSION
     } else {
@@ -141,6 +170,10 @@ pub struct ColumnMeta {
     /// `type` (`int8` or `uint8`). Absent for scalar columns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dim: Option<usize>,
+    /// For a vector column stored as a list of `dim` elements, `"list"`
+    /// (version 4); absent for fixed-length binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
 }
 
 /// Where a tile is in a Parquet file: its row group, its first row there,
@@ -308,6 +341,8 @@ mod tests {
             data_resolution: 9,
             tile_size,
             row_group_size,
+            weights: None,
+            owner: false,
             bbox: [0.0, 0.0, 1.0, 1.0],
             columns: vec![],
             levels: levels

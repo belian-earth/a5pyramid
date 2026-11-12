@@ -17,7 +17,7 @@ use crate::bbox::Bbox;
 use crate::column::ColumnType;
 use crate::error::{invalid, Error, Result};
 use crate::meta::{PyramidMeta, TileLocation, A5_INDEX_KEY, META_KEY};
-use crate::{CELL_COLUMN, LOD_COLUMN, NCELL_COLUMN};
+use crate::{CELL_COLUMN, LOD_COLUMN, NCELL_COLUMN, OWNER_COLUMN};
 
 /// An open pyramid file: its index and Parquet metadata.
 #[derive(Clone, Debug)]
@@ -99,6 +99,11 @@ impl PyramidFile {
 
     pub fn n_row_groups(&self) -> usize {
         self.arrow.metadata().num_row_groups()
+    }
+
+    /// The Arrow schema of the file's columns.
+    pub fn schema(&self) -> arrow_schema::SchemaRef {
+        self.arrow.schema().clone()
     }
 
     /// The file's Parquet metadata, with its page index where it has one.
@@ -273,14 +278,49 @@ fn check_schema(arrow: &ArrowReaderMetadata, meta: &PyramidMeta) -> Result<()> {
             Err(_) => Err(Error::Format(format!("the file has no {name:?} column"))),
         }
     };
+    let has = |name: &str| schema.field_with_name(name).is_ok();
     want(CELL_COLUMN, DataType::UInt64)?;
-    want(LOD_COLUMN, DataType::UInt8)?;
-    want(NCELL_COLUMN, DataType::UInt32)?;
+    // version 4: lod only in a file of several levels, ncell only where a
+    // row can summarise more than one leaf
+    if has(LOD_COLUMN) || meta.levels.len() > 1 || meta.format_version < 4 {
+        want(LOD_COLUMN, DataType::UInt8)?;
+    }
+    let all_leaves = meta.levels.iter().all(|l| l.lod == meta.data_resolution);
+    if has(NCELL_COLUMN) || !all_leaves || meta.format_version < 4 {
+        want(NCELL_COLUMN, DataType::UInt32)?;
+    }
+    if meta.owner {
+        want(OWNER_COLUMN, DataType::UInt64)?;
+    }
+    if let Some(w) = &meta.weights {
+        let ty = ColumnType::parse(&w.ty)
+            .map_err(|_| Error::Format(format!("weights column {:?} has unknown type {:?}", w.name, w.ty)))?;
+        want(&w.name, ty.data_type())?;
+    }
     for c in &meta.columns {
         let ty = ColumnType::parse(&c.ty)
             .map_err(|_| Error::Format(format!("column {:?} has unknown type {:?}", c.name, c.ty)))?;
         match c.dim {
             None => want(&c.name, ty.data_type())?,
+            Some(dim)
+                if ty.is_byte() && dim > 0 && dim <= i32::MAX as usize && c.storage.as_deref() == Some("list") =>
+            {
+                // a list of dim elements reads back as an Arrow list; the
+                // reader checks every row's length
+                match schema.field_with_name(&c.name).map(|f| f.data_type()) {
+                    Ok(DataType::List(item)) | Ok(DataType::LargeList(item)) if item.data_type() == &ty.data_type() => {
+                    }
+                    Ok(DataType::FixedSizeList(item, n))
+                        if *n as usize == dim && item.data_type() == &ty.data_type() => {}
+                    Ok(t) => {
+                        return Err(Error::Format(format!(
+                            "vector column {:?} is {t}, not a list of {dim} {}",
+                            c.name, c.ty
+                        )))
+                    }
+                    Err(_) => return Err(Error::Format(format!("the file has no {:?} column", c.name))),
+                }
+            }
             Some(dim) if ty.is_byte() && dim > 0 && dim <= i32::MAX as usize => {
                 want(&c.name, DataType::FixedSizeBinary(dim as i32))?
             }

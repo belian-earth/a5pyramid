@@ -42,20 +42,30 @@ mod error;
 mod meta;
 mod read;
 mod set;
+mod set_table;
 mod tiled;
 mod tiles;
+#[cfg(test)]
+mod v4_tests;
 mod write;
 
 pub use bbox::Bbox;
 pub use build::{build, default_lods, Leaves, Level, Pyramid};
 pub use cancel::Cancel;
-pub use column::{Codec, Column, ColumnSpec, ColumnType, Reducer, VectorColumn, VectorSpec};
+pub use column::{
+    Codec, Column, ColumnSpec, ColumnType, Reducer, VectorColumn, VectorSpec, VectorStorage, WeightsSpec,
+};
 pub use error::{Error, Result};
-pub use meta::{ColumnMeta, LevelMeta, PyramidMeta, ShardMeta, A5_INDEX, A5_INDEX_KEY, FORMAT_VERSION, META_KEY};
+pub use meta::{
+    ColumnMeta, LevelMeta, PyramidMeta, ShardMeta, TileLocation, WeightsMeta, A5_INDEX, A5_INDEX_KEY, FORMAT_VERSION,
+    META_KEY,
+};
 pub use read::PyramidFile;
 pub use set::{
-    default_tiers, write_set, SetMeta, SetOptions, ShardEntry, Tier, DEFAULT_SET_TILE_SIZE, SET_FORMAT, SET_INDEX,
+    default_tiers, write_set, SetIndexFormat, SetMeta, SetOptions, ShardEntry, Tier, DEFAULT_SET_TILE_SIZE, SET_FORMAT,
+    SET_INDEX,
 };
+pub use set_table::{read_set_table, write_set_table, SET_META_KEY, SET_TABLE, SET_TABLE_COLUMNS};
 pub use tiled::{TileOptions, TileReader, TiledPyramid};
 pub use tiles::plan_tiles;
 pub use write::{write_parquet, Compression, ParquetOptions, WriteSummary};
@@ -70,9 +80,12 @@ pub const CELL_COLUMN: &str = "cell";
 pub const LOD_COLUMN: &str = "lod";
 /// Name of the column holding the number of leaves each row summarises.
 pub const NCELL_COLUMN: &str = "ncell";
+/// Name of the column holding, in a shard with partial rows, the cell at
+/// the shard resolution containing each row cell's centre (format version 4).
+pub const OWNER_COLUMN: &str = "owner";
 
 /// Column names a value column may not take.
-pub const RESERVED_COLUMNS: [&str; 3] = [CELL_COLUMN, LOD_COLUMN, NCELL_COLUMN];
+pub const RESERVED_COLUMNS: [&str; 4] = [CELL_COLUMN, LOD_COLUMN, NCELL_COLUMN, OWNER_COLUMN];
 
 /// A cell id as 16 zero-padded hex digits, as a5R and a5-js print them.
 pub(crate) fn hex(cell: u64) -> String {

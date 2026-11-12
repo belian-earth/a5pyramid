@@ -9,7 +9,7 @@ NULL
 #' build.
 #' @noRd
 #' @keywords internal
-a5pyramid_leaves_rs <- function(cells, values, names, types, reducers, codecs, weights, sd, dims) .Call(wrap__a5pyramid_leaves_rs, cells, values, names, types, reducers, codecs, weights, sd, dims)
+a5pyramid_leaves_rs <- function(cells, values, names, types, reducers, codecs, weights, sd, dims, storage, weights_name, weights_type, ncell) .Call(wrap__a5pyramid_leaves_rs, cells, values, names, types, reducers, codecs, weights, sd, dims, storage, weights_name, weights_type, ncell)
 
 #' The number of leaves in a handle and the resolution of the first (NA
 #' when there are none).
@@ -31,7 +31,7 @@ a5pyramid_stream_slot_rs <- function() .Call(wrap__a5pyramid_stream_slot_rs)
 #' is never held twice; an interrupt between batches stops the read.
 #' @noRd
 #' @keywords internal
-a5pyramid_leaves_arrow_rs <- function(holder, cell, names, types, reducers, codecs, weights, sd, dims) .Call(wrap__a5pyramid_leaves_arrow_rs, holder, cell, names, types, reducers, codecs, weights, sd, dims)
+a5pyramid_leaves_arrow_rs <- function(holder, cell, names, types, reducers, codecs, weights, sd, dims, storage, weights_type, ncell) .Call(wrap__a5pyramid_leaves_arrow_rs, holder, cell, names, types, reducers, codecs, weights, sd, dims, storage, weights_type, ncell)
 
 #' Build a pyramid and return its rows.
 #' @noRd
@@ -55,7 +55,23 @@ a5pyramid_arrow_rs <- function(leaves, lods, tile_size, meta_keys, meta_values, 
 #' the set's index.
 #' @noRd
 #' @keywords internal
-a5pyramid_write_set_rs <- function(leaves, lods, dest, tier_lod_min, tier_lod_max, tier_shard_resolution, tier_tile_size, tier_row_group_size, compression, meta_keys, meta_values, generator, threads) .Call(wrap__a5pyramid_write_set_rs, leaves, lods, dest, tier_lod_min, tier_lod_max, tier_shard_resolution, tier_tile_size, tier_row_group_size, compression, meta_keys, meta_values, generator, threads)
+a5pyramid_write_set_rs <- function(leaves, lods, dest, tier_lod_min, tier_lod_max, tier_shard_resolution, tier_tile_size, tier_row_group_size, compression, meta_keys, meta_values, generator, index, threads) .Call(wrap__a5pyramid_write_set_rs, leaves, lods, dest, tier_lod_min, tier_lod_max, tier_shard_resolution, tier_tile_size, tier_row_group_size, compression, meta_keys, meta_values, generator, index, threads)
+
+#' Write one level of precomputed rows (from `a5pyramid_leaves_rs()` or
+#' `a5pyramid_leaves_arrow_rs()`, with their ncell) to `dest` as a pyramid
+#' file, a shard of tier `shard_tier` keyed by `shard_cell` (hex) at
+#' `shard_resolution` when `shard_cell` is not empty; returns a summary.
+#' @noRd
+#' @keywords internal
+a5pyramid_write_level_rs <- function(rows, data_resolution, dest, tile_size, row_group_size, compression, meta_keys, meta_values, generator, shard_tier, shard_cell, shard_resolution, owner, lod_column, ncell_column, threads) .Call(wrap__a5pyramid_write_level_rs, rows, data_resolution, dest, tile_size, row_group_size, compression, meta_keys, meta_values, generator, shard_tier, shard_cell, shard_resolution, owner, lod_column, ncell_column, threads)
+
+#' Write a set's shard table to `dest`: its own fields from the shard file
+#' `template`, the tiers and shards from R's columns (a shard with an NA
+#' path listed empty, its box NA), and the writer's columns from the Arrow
+#' stream in `extra` (NULL for none). Returns the set's index.
+#' @noRd
+#' @keywords internal
+a5pyramid_write_set_table_rs <- function(template, dest, tier_lod_min, tier_lod_max, tier_shard_resolution, tier_tile_size, tier_row_group_size, shard_tier, shard_cell, shard_path, shard_rows, shard_tiles, shard_bytes, shard_footer_bytes, shard_box, meta_keys, meta_values, generator, extra, compression) .Call(wrap__a5pyramid_write_set_table_rs, template, dest, tier_lod_min, tier_lod_max, tier_shard_resolution, tier_tile_size, tier_row_group_size, shard_tier, shard_cell, shard_path, shard_rows, shard_tiles, shard_bytes, shard_footer_bytes, shard_box, meta_keys, meta_values, generator, extra, compression)
 
 #' The default tiers of a set with leaves at `data_resolution` and levels
 #' at `lods`.

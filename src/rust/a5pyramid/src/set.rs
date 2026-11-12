@@ -26,8 +26,12 @@ use crate::bbox::Bbox;
 use crate::build::{Level, Pyramid};
 use crate::cancel::Cancel;
 use crate::error::{invalid, Error, Result};
-use crate::meta::{column_meta, version_with, ColumnMeta, ShardMeta, A5_INDEX, FORMAT_VERSION, SHARD_FILE_VERSION};
+use crate::meta::{
+    column_meta, version_with, ColumnMeta, ShardMeta, WeightsMeta, A5_INDEX, FORMAT_VERSION, SHARD_FILE_VERSION,
+    VERSION_4,
+};
 use crate::read::PyramidFile;
+use crate::set_table::{read_set_table, write_set_table, SET_TABLE};
 use crate::tiled::{TileOptions, TiledPyramid};
 use crate::write::{write_parquet, ParquetOptions};
 
@@ -114,9 +118,23 @@ pub struct SetOptions {
     /// single file.
     pub metadata: Vec<(String, String)>,
     pub parquet: ParquetOptions,
+    /// How to write the set's index.
+    pub index: SetIndexFormat,
 }
 
-/// The index of a set, `set.json` in its directory.
+/// The form of a set's index.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SetIndexFormat {
+    /// `set.json`, one document (the default).
+    #[default]
+    Json,
+    /// `set.parquet`, a shard table (format version 4; see
+    /// [`crate::write_set_table`]).
+    Parquet,
+}
+
+/// The index of a set: `set.json` in its directory, or the footer and rows
+/// of its `set.parquet`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct SetMeta {
     /// Always [`SET_FORMAT`].
@@ -129,6 +147,9 @@ pub struct SetMeta {
     pub a5_index: String,
     pub data_resolution: i32,
     pub columns: Vec<ColumnMeta>,
+    /// Version 4: the weights column every shard stores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weights: Option<WeightsMeta>,
     /// In ascending LOD order; a tier's number is its position.
     pub tiers: Vec<Tier>,
     /// The box of every shard's box.
@@ -145,8 +166,10 @@ pub struct ShardEntry {
     pub tier: usize,
     /// The shard cell, 16 hex digits.
     pub cell: String,
-    /// The file, relative to the set's directory, with `/` separators.
-    pub path: String,
+    /// The file, relative to the set's directory, with `/` separators;
+    /// `None` for a shard listed as empty, with no file (version 4).
+    #[serde(default)]
+    pub path: Option<String>,
     pub rows: u64,
     pub tiles: usize,
     /// The file's size.
@@ -156,8 +179,9 @@ pub struct ShardEntry {
     /// and the closing `PAR1`. A reader that fetches the last `footer_bytes`
     /// bytes has the whole footer in one request.
     pub footer_bytes: u64,
-    /// The box of every tile in the shard.
-    pub bbox: [f64; 4],
+    /// The box of every tile in the shard; `None` for an empty shard.
+    #[serde(default)]
+    pub bbox: Option<[f64; 4]>,
 }
 
 impl SetMeta {
@@ -183,16 +207,71 @@ impl SetMeta {
         Ok(serde_json::to_string(self)?)
     }
 
-    /// Read the index of the set at `path`: its directory, or its
-    /// `set.json`.
+    /// Read the index of the set at `path`: its directory (holding
+    /// `set.json` or `set.parquet`), or one of those files.
     pub fn read(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let file = if path.is_dir() {
-            path.join(SET_INDEX)
+            if path.join(SET_INDEX).exists() || !path.join(SET_TABLE).exists() {
+                path.join(SET_INDEX)
+            } else {
+                path.join(SET_TABLE)
+            }
         } else {
             path.to_path_buf()
         };
+        if file.extension().is_some_and(|e| e == "parquet") {
+            return Ok(read_set_table(&file)?.0);
+        }
         Self::from_json(&std::fs::read_to_string(&file)?)
+    }
+
+    /// The index of a set whose shards were written one at a time, such as
+    /// a store's files: its own fields from one shard (`template`), its
+    /// columns, weights, leaves' resolution and a5 crate, which every shard
+    /// shares; `tiers` in ascending LOD order; `shards` by tier and cell,
+    /// a shard without a file listed empty. It is version 4, for a
+    /// [`crate::write_set_table`].
+    pub fn assemble(
+        template: &PyramidFile,
+        tiers: Vec<Tier>,
+        shards: Vec<ShardEntry>,
+        generator: String,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<Self> {
+        for w in tiers.windows(2) {
+            if w[1].lods[0] <= w[0].lods[1] {
+                return Err(invalid("tiers must be in ascending LOD order and not overlap"));
+            }
+        }
+        if let Some(t) = tiers.iter().find(|t| t.tile_size == 0 || t.lods[0] > t.lods[1]) {
+            return Err(invalid(format!(
+                "the tier of LODs {} to {} is not sound",
+                t.lods[0], t.lods[1]
+            )));
+        }
+        let m = &template.meta;
+        let boxes: Vec<Bbox> = shards
+            .iter()
+            .filter_map(|s| s.bbox)
+            .map(Bbox::from_array)
+            .collect::<Result<_>>()?;
+        let meta = SetMeta {
+            format: SET_FORMAT.to_string(),
+            format_version: VERSION_4,
+            generator,
+            a5_crate: m.a5_crate.clone(),
+            a5_index: template.a5_index.clone().unwrap_or_else(|| A5_INDEX.to_string()),
+            data_resolution: m.data_resolution,
+            columns: m.columns.clone(),
+            weights: m.weights.clone(),
+            tiers,
+            bbox: Bbox::covering(&boxes).unwrap_or(Bbox::WORLD).to_array(),
+            shards,
+            metadata,
+        };
+        crate::set_table::check_shards(&meta)?;
+        Ok(meta)
     }
 
     /// The tier holding `lod`, if any.
@@ -207,10 +286,12 @@ impl SetMeta {
         self.shards
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.tier == tier)
+            .filter(|(_, s)| s.tier == tier && s.path.is_some())
             .filter(|(_, s)| {
+                let Some([west, south, east, north]) = s.bbox else {
+                    return false;
+                };
                 bbox.is_none_or(|b| {
-                    let [west, south, east, north] = s.bbox;
                     Bbox {
                         west,
                         south,
@@ -288,13 +369,14 @@ fn write_shards(
         data_resolution,
         columns,
         vectors,
+        weights,
         levels,
     } = pyramid;
     let mut levels: Vec<Option<Level>> = levels.into_iter().map(Some).collect();
     let dims: Vec<usize> = vectors.iter().map(|v| v.dim).collect();
     let mut shards = Vec::new();
-    // whether any shard has a row group of several tiles (version 4)
-    let mut several = false;
+    // whether any shard uses a version 4 feature
+    let mut v4 = false;
     for (t, tier) in tiers.iter().enumerate() {
         cancel.check()?;
         let tier_levels: Vec<Level> = levels
@@ -336,27 +418,29 @@ fn write_shards(
                 generator: opts.generator.clone(),
                 metadata: opts.metadata.clone(),
                 shard: Some(shard.clone()),
+                ..Default::default()
             };
             let shard_pyramid = Pyramid {
                 data_resolution,
                 columns: columns.clone(),
                 vectors: vectors.clone(),
+                weights: weights.clone(),
                 levels: shard_levels,
             };
             let tiled = TiledPyramid::new(shard_pyramid, &tile_opts, cancel)?;
-            several |= tiled.meta().row_group_size.is_some();
+            v4 |= tiled.meta().format_version >= 4;
             // write_parquet removes its own partial file on failure
             let summary = write_parquet(&tiled, &path, &opts.parquet, cancel)?;
             written.files.push(path.clone());
             shards.push(ShardEntry {
                 tier: t,
                 cell: shard.cell,
-                path: rel,
+                path: Some(rel),
                 rows: summary.rows,
                 tiles: summary.tiles,
                 bytes: summary.bytes,
                 footer_bytes: PyramidFile::open(&path)?.footer_bytes(),
-                bbox: tiled.meta().bbox,
+                bbox: Some(tiled.meta().bbox),
             });
             #[cfg(test)]
             if FAIL_AFTER_SHARDS.with(|f| f.get()) == Some(shards.len()) {
@@ -367,26 +451,35 @@ fn write_shards(
 
     let boxes: Vec<Bbox> = shards
         .iter()
-        .map(|s| Bbox {
-            west: s.bbox[0],
-            south: s.bbox[1],
-            east: s.bbox[2],
-            north: s.bbox[3],
+        .filter_map(|s| s.bbox)
+        .map(|b| Bbox {
+            west: b[0],
+            south: b[1],
+            east: b[2],
+            north: b[3],
         })
         .collect();
+    let parquet_index = opts.index == SetIndexFormat::Parquet;
     let meta = SetMeta {
         format: SET_FORMAT.to_string(),
-        format_version: version_with(&vectors, several, SHARD_FILE_VERSION),
+        format_version: version_with(&vectors, v4 || parquet_index, SHARD_FILE_VERSION),
         generator: opts.generator.clone(),
         a5_crate: crate::A5_CRATE_VERSION.to_string(),
         a5_index: A5_INDEX.to_string(),
         data_resolution,
         columns: column_meta(&columns, &vectors),
+        weights: weights.as_ref().map(Into::into),
         tiers,
         bbox: Bbox::covering(&boxes).unwrap_or(Bbox::WORLD).to_array(),
         shards,
         metadata: opts.metadata.iter().cloned().collect(),
     };
+    if parquet_index {
+        // written under a temporary name and renamed by write_set_table
+        written.files.push(dir.join(SET_TABLE));
+        write_set_table(&meta, None, dir.join(SET_TABLE), &opts.parquet)?;
+        return Ok(meta);
+    }
     let index = dir.join(SET_INDEX);
     let tmp = partial(&index);
     written.files.push(tmp.clone());
@@ -579,6 +672,11 @@ fn gather(level: &Level, rows: &[u32], dims: &[usize]) -> Level {
                 out
             })
             .collect(),
+        weights: if level.weights.is_empty() {
+            Vec::new()
+        } else {
+            rows.par_iter().map(|r| level.weights[pick(r)]).collect()
+        },
     }
 }
 
@@ -640,6 +738,7 @@ mod tests {
             generator: "test".into(),
             metadata: vec![("app".into(), "{\"k\":1}".into())],
             parquet: ParquetOptions::default(),
+            index: Default::default(),
         }
     }
 
@@ -690,7 +789,7 @@ mod tests {
 
         let mut back: BTreeMap<i32, Vec<(u64, u32, Vec<f64>)>> = BTreeMap::new();
         for s in &meta.shards {
-            let path = dir.join(&s.path);
+            let path = dir.join(s.path.as_ref().unwrap());
             let f = PyramidFile::open(&path).unwrap();
             let m = &f.meta;
             assert_eq!(m.format_version, 2);
@@ -702,7 +801,7 @@ mod tests {
             assert_eq!(m.data_resolution, 12);
             assert_eq!(s.bytes, std::fs::metadata(&path).unwrap().len());
             assert_eq!(s.footer_bytes, f.footer_bytes());
-            assert_eq!(s.bbox, m.bbox);
+            assert_eq!(s.bbox, Some(m.bbox));
             assert_eq!(f.n_row_groups(), s.tiles);
             m.validate(s.tiles).unwrap();
             let shard_cell = u64::from_str_radix(&s.cell, 16).unwrap();
@@ -905,7 +1004,7 @@ mod tests {
         // every row of every level, with its vector, is in exactly one shard
         let mut got: Vec<(u64, Vec<u8>)> = Vec::new();
         for s in &meta.shards {
-            let f = PyramidFile::open(dir.join(&s.path)).unwrap();
+            let f = PyramidFile::open(dir.join(s.path.as_ref().unwrap())).unwrap();
             assert_eq!(f.meta.format_version, 3);
             for b in f.read(&(0..f.n_tiles()).collect::<Vec<_>>()).unwrap() {
                 let cells = b.column(0).as_primitive::<arrow_array::types::UInt64Type>();
@@ -942,7 +1041,7 @@ mod tests {
         let mut several = 0;
         let mut rows = 0;
         for s in &meta.shards {
-            let f = PyramidFile::open(dir.join(&s.path)).unwrap();
+            let f = PyramidFile::open(dir.join(s.path.as_ref().unwrap())).unwrap();
             assert_eq!(s.tiles, f.n_tiles());
             if f.n_tiles() > f.n_row_groups() {
                 several += 1;
@@ -963,7 +1062,7 @@ mod tests {
         let dir = tempdir("versions");
         let meta = write_set(pyramid(), &dir, &opts(tiers()), &Cancel::new()).unwrap();
         assert_eq!(meta.format_version, 2);
-        let f = PyramidFile::open(dir.join(&meta.shards[0].path)).unwrap();
+        let f = PyramidFile::open(dir.join(meta.shards[0].path.as_ref().unwrap())).unwrap();
         assert_eq!(f.meta.format_version, 2);
         std::fs::remove_dir_all(&dir).unwrap();
     }

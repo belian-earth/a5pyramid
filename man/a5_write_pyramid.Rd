@@ -17,6 +17,8 @@ a5_write_pyramid(
   codecs = NULL,
   tile_size = 4096L,
   row_group_size = NULL,
+  storage = NULL,
+  weights_type = NULL,
   compression = c("snappy", "zstd", "none"),
   metadata = NULL,
   threads = NULL
@@ -82,6 +84,19 @@ outside the view. Default: 4096.}
 \item{row_group_size}{\code{NULL} (default) for one tile a row group, or the
 most rows in a row group of several tiles, at least \code{tile_size} (see
 "File layout"). The embeddings store uses 131072 with tiles of 16384.}
+
+\item{storage}{Named character vector of how to store vector columns:
+\code{"fixed_binary"} (default), one fixed-length binary value a row, the
+smallest footer and the fastest decode; or \code{"list"}, a Parquet list of
+the elements, dictionary encoded, which engines such as DuckDB read as
+an array column (\code{TINYINT[]}), as the a5embeddings store keeps its
+embeddings (format version 4). Such as \code{c(embedding = "list")}.}
+
+\item{weights_type}{\code{NULL} (default), or a storage type (see "Column
+types") in which to keep each row's summed \code{weights} at every level, as
+a column named as the weights, beside the value columns and not one of
+them: a reader that merges rows of one cell weights them by it (format
+version 4 in a file). Needs \code{weights}.}
 
 \item{compression}{\code{"snappy"} (default), \code{"zstd"} or \code{"none"}. hyparquet
 decodes snappy itself; zstd needs the \code{hyparquet-compressors} package
