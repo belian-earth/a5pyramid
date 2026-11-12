@@ -1,5 +1,9 @@
 # a5pyramid (development version)
 
+* a5R comes from CRAN: `Remotes` no longer names `belian-earth/a5R`, now that
+  a5R 1.0.0 is released. An unpinned remote is a request for a5R's default
+  branch, and pak refused to install a5pyramid beside any other pinned a5R
+  ref (belian-production's base image pins a5R by commit).
 * The rest of format version 4, for one store that engines and browsers
   read alike (belian-production `docs/store-v4.md`):
   * **List vectors:** `storage = c(embedding = "list")` stores a vector as
