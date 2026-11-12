@@ -528,6 +528,12 @@ fn merge_rows(
     cancel: &Cancel,
 ) -> Result<RecordBatch> {
     let n = acc.cell.len();
+    if n > u32::MAX as usize {
+        return Err(invalid(format!(
+            "{n} partial rows is more than one merge can hold ({}): merge fewer keys at once",
+            u32::MAX
+        )));
+    }
     // rows of one (LOD, cell) together; within them in input order, and the
     // sums are of integers wherever they are exact, so the order is moot
     let mut order: Vec<u32> = (0..n as u32).collect();
