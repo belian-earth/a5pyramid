@@ -16,6 +16,9 @@ a5_write_pyramid(
   rep_sd = NULL,
   codecs = NULL,
   tile_size = 4096L,
+  row_group_size = NULL,
+  storage = NULL,
+  weights_type = NULL,
   compression = c("snappy", "zstd", "none"),
   metadata = NULL,
   threads = NULL
@@ -74,9 +77,26 @@ agree.}
 whose values are codes, such as \code{c(embedding = "aef")}. See "Codecs".
 Default \code{NULL}: every column stores its values.}
 
-\item{tile_size}{The most rows in a tile (row group). Larger tiles mean
-fewer requests and a smaller footer; smaller tiles mean less data
-fetched outside the view. Default: 4096.}
+\item{tile_size}{The most rows in a tile. Larger tiles mean fewer
+requests and a smaller footer; smaller tiles mean less data fetched
+outside the view. Default: 4096.}
+
+\item{row_group_size}{\code{NULL} (default) for one tile a row group, or the
+most rows in a row group of several tiles, at least \code{tile_size} (see
+"File layout"). The embeddings store uses 131072 with tiles of 16384.}
+
+\item{storage}{Named character vector of how to store vector columns:
+\code{"fixed_binary"} (default), one fixed-length binary value a row, the
+smallest footer and the fastest decode; or \code{"list"}, a Parquet list of
+the elements, dictionary encoded, which engines such as DuckDB read as
+an array column (\code{TINYINT[]}), as the a5embeddings store keeps its
+embeddings (format version 4). Such as \code{c(embedding = "list")}.}
+
+\item{weights_type}{\code{NULL} (default), or a storage type (see "Column
+types") in which to keep each row's summed \code{weights} at every level, as
+a column named as the weights, beside the value columns and not one of
+them: a reader that merges rows of one cell weights them by it (format
+version 4 in a file). Needs \code{weights}.}
 
 \item{compression}{\code{"snappy"} (default), \code{"zstd"} or \code{"none"}. hyparquet
 decodes snappy itself; zstd needs the \code{hyparquet-compressors} package
@@ -108,6 +128,14 @@ globe. A level is split down the A5 index hierarchy only where a run
 holds more than \code{tile_size} cells, which makes tiles coarse where data
 is sparse and fine where it is dense, and keeps every level sorted by
 cell id.
+
+With \code{row_group_size}, each level is split down the hierarchy into row
+groups of at most \code{row_group_size} rows instead, and each row group into
+tiles of \code{tile_size} rows (the last shorter), each one data page of
+every column. Engines that read whole row groups, such as DuckDB over
+S3, then make fewer requests, while a browser still reads one tile at a
+time: the file carries the Parquet page index, which locates each tile's
+pages. Such a file is in format version 4.
 
 The file's key-value metadata holds a JSON index under \code{"a5pyramid"}:
 the leaves' resolution, the value columns with their types and reducers,

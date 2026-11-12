@@ -45,9 +45,14 @@
 #'   resolution from 2 up to the leaves'.
 #' @param tiers A data frame with one row per tier and columns `lod_min` and
 #'   `lod_max` (the tier's LODs, inclusive), `shard_resolution` (from 0 up
-#'   to `lod_min`) and optionally `tile_size` (default 16384). Between them
-#'   the tiers must hold every level, the leaves included, and each must
-#'   hold at least one. Default: [a5_pyramid_set_tiers()].
+#'   to `lod_min`), and optionally `tile_size` (default 16384) and
+#'   `row_group_size` (default `NA`, one tile a row group; see
+#'   [a5_write_pyramid()]). Between them the tiers must hold every level,
+#'   the leaves included, and each must hold at least one. Default:
+#'   [a5_pyramid_set_tiers()].
+#' @param index `"json"` (default) for `set.json`, or `"parquet"` for
+#'   `set.parquet`, a shard table (format version 4; see
+#'   [a5_write_pyramid_set_table()]).
 #' @returns `dest`, invisibly.
 #' @seealso [a5_pyramid_set_info()] to read the index, [a5_write_pyramid()]
 #'   for a single file.
@@ -78,6 +83,9 @@ a5_write_pyramid_set <- function(x,
                                  types = NULL,
                                  rep_sd = NULL,
                                  codecs = NULL,
+                                 storage = NULL,
+                                 weights_type = NULL,
+                                 index = c("json", "parquet"),
                                  compression = c("snappy", "zstd", "none"),
                                  metadata = NULL,
                                  threads = NULL) {
@@ -94,10 +102,12 @@ a5_write_pyramid_set <- function(x,
   }
   aggregate <- rlang::arg_match(aggregate)
   compression <- rlang::arg_match(compression)
+  index <- rlang::arg_match(index)
   meta <- check_metadata(metadata)
   tiers <- check_tiers(tiers)
   threads <- resolve_threads(threads)
-  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd, codecs)
+  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd, codecs,
+                         storage = storage, weights_type = weights_type)
   if (is.null(tiers)) {
     tiers <- a5_pyramid_set_tiers(input$resolution, input$lods)
   } else if (is.null(lods)) {
@@ -111,10 +121,12 @@ a5_write_pyramid_set <- function(x,
     tier_lod_max = tiers$lod_max,
     tier_shard_resolution = tiers$shard_resolution,
     tier_tile_size = tiers$tile_size,
+    tier_row_group_size = ifelse(is.na(tiers$row_group_size), 0L, tiers$row_group_size),
     compression = compression,
     meta_keys = meta$keys,
     meta_values = meta$values,
     generator = paste("a5pyramid", utils::packageVersion("a5pyramid")),
+    index = index,
     threads = threads
   ))
   invisible(dest)
@@ -133,7 +145,8 @@ a5_write_pyramid_set <- function(x,
 #' @param lods The coarser LODs. Default: every resolution from 2 up to
 #'   `data_resolution`.
 #' @returns A data frame with one row per tier, in ascending LOD order:
-#'   `lod_min`, `lod_max`, `shard_resolution` and `tile_size`.
+#'   `lod_min`, `lod_max`, `shard_resolution`, `tile_size` and
+#'   `row_group_size` (`NA`: one tile a row group).
 #' @export
 #' @examples
 #' a5_pyramid_set_tiers(18)
@@ -167,12 +180,16 @@ a5_pyramid_set_tiers <- function(data_resolution, lods = NULL) {
 #'     undefined; `NA` for other reducers and older files), and `dim`, the
 #'     elements per cell of a vector column (`NA` for scalar columns).
 #'   - `tiers`: a tibble with one row per tier: `tier` (from 0), `lod_min`,
-#'     `lod_max`, `shard_resolution`, `tile_size`, and its `shards`, `rows`
-#'     and `bytes`.
+#'     `lod_max`, `shard_resolution`, `tile_size`, `row_group_size` (`NA`
+#'     for one tile a row group), and its `shards`, `rows` and `bytes`.
+#'   - `weights`: the weights column every shard stores (a list of its
+#'     `name` and `type`), or `NULL`.
 #'   - `shards`: a tibble with one row per shard: `tier`, `cell` (the shard
-#'     cell, an [a5R::a5_cell]), `path` (relative to the set's directory),
-#'     `rows`, `tiles`, `bytes`, `footer_bytes` (what a reader fetches to
-#'     open it) and `xmin`, `ymin`, `xmax`, `ymax`.
+#'     cell, an [a5R::a5_cell]), `path` (relative to the set's directory;
+#'     `NA` for a shard listed as empty, with no file), `rows`, `tiles`,
+#'     `bytes`, `footer_bytes` (what a reader fetches to open it) and
+#'     `xmin`, `ymin`, `xmax`, `ymax`; for a shard table, its writer's own
+#'     columns follow, read with arrow where it is installed.
 #'   - `metadata`: the set's metadata, a named character vector.
 #' @seealso [a5_pyramid_info()] for one shard.
 #' @export
@@ -187,9 +204,11 @@ a5_pyramid_set_info <- function(src) {
   check_string(src, "src")
   src <- path.expand(src)
   dir <- if (dir.exists(src)) src else dirname(src)
-  if (!file.exists(src) || (dir.exists(src) && !file.exists(file.path(src, "set.json")))) {
-    a5pyramid_abort("io", "{.arg src} ({.path {src}}) is not a pyramid set: no {.file set.json}.")
+  has <- function(f) file.exists(file.path(src, f))
+  if (!file.exists(src) || (dir.exists(src) && !has("set.json") && !has("set.parquet"))) {
+    a5pyramid_abort("io", "{.arg src} ({.path {src}}) is not a pyramid set: no {.file set.json} or {.file set.parquet}.")
   }
+  table <- if (dir.exists(src)) (!has("set.json") && has("set.parquet")) else grepl("[.]parquet$", src)
   r <- rs_call(a5pyramid_set_info_rs(src))
   check_index(r$a5_index, src)
   s <- r$shards
@@ -207,6 +226,13 @@ a5_pyramid_set_info <- function(src) {
     xmax = lon$xmax,
     ymax = s$north
   )
+  # a shard table's own columns, read by arrow where it is installed
+  if (table && requireNamespace("arrow", quietly = TRUE)) {
+    file <- if (dir.exists(src)) file.path(src, "set.parquet") else src
+    own <- arrow::read_parquet(file, as_data_frame = FALSE)
+    cols <- setdiff(names(own), SET_TABLE_COLUMNS)
+    if (length(cols) > 0L) shards <- tibble::as_tibble(c(shards, as.data.frame(own[, cols])))
+  }
   t <- r$tiers
   tier <- seq_along(t$lod_min) - 1L
   per_tier <- function(v) vapply(tier, function(k) sum(v[s$tier == k]), double(1))
@@ -216,7 +242,8 @@ a5_pyramid_set_info <- function(src) {
     lod_max = t$lod_max,
     shard_resolution = t$shard_resolution,
     tile_size = t$tile_size,
-    shards = as.integer(per_tier(rep(1, length(s$tier)))),
+    row_group_size = t$row_group_size,
+    shards = as.integer(per_tier(as.double(!is.na(s$path)))),
     rows = per_tier(s$rows),
     bytes = per_tier(s$bytes)
   )
@@ -233,6 +260,7 @@ a5_pyramid_set_info <- function(src) {
       data_resolution = r$data_resolution,
       bbox = c(xmin = bbox_lon$xmin, ymin = r$bbox[2], xmax = bbox_lon$xmax, ymax = r$bbox[4]),
       columns = tibble::new_tibble(r$columns, nrow = length(r$columns$name)),
+      weights = r$weights,
       tiers = tiers,
       shards = shards,
       metadata = meta
@@ -274,8 +302,9 @@ print.a5pyramid_set_info <- function(x, ...) {
 }
 
 #' Validate `tiers` for a5_write_pyramid_set(): NULL, or a data frame with
-#' whole-number lod_min, lod_max and shard_resolution, and tile_size
-#' (default 16384). The engine checks how the tiers fit the levels.
+#' whole-number lod_min, lod_max and shard_resolution, tile_size (default
+#' 16384) and row_group_size (default NA). The engine checks how the tiers
+#' fit the levels.
 #' @noRd
 check_tiers <- function(tiers, call = rlang::caller_env()) {
   if (is.null(tiers)) {
@@ -301,6 +330,16 @@ check_tiers <- function(tiers, call = rlang::caller_env()) {
     }
     out[[nm]] <- as.integer(v)
   }
+  rgs <- tiers$row_group_size
+  if (is.null(rgs)) {
+    rgs <- rep(NA_integer_, nrow(tiers))
+  }
+  ok <- (is.logical(rgs) && all(is.na(rgs))) ||
+    (is.numeric(rgs) && all(is.na(rgs) | (rgs == trunc(rgs) & rgs >= out$tile_size & rgs <= .Machine$integer.max)))
+  if (!ok) {
+    a5pyramid_abort("input", "{.arg tiers}{.field $row_group_size} must hold {.code NA} or whole numbers of at least the tier's {.field tile_size}.", call = call)
+  }
+  out$row_group_size <- as.integer(rgs)
   out
 }
 

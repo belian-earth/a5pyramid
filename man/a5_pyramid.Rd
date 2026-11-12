@@ -14,6 +14,7 @@ a5_pyramid(
   types = NULL,
   rep_sd = NULL,
   codecs = NULL,
+  weights_type = NULL,
   threads = NULL
 )
 }
@@ -66,6 +67,12 @@ agree.}
 whose values are codes, such as \code{c(embedding = "aef")}. See "Codecs".
 Default \code{NULL}: every column stores its values.}
 
+\item{weights_type}{\code{NULL} (default), or a storage type (see "Column
+types") in which to keep each row's summed \code{weights} at every level, as
+a column named as the weights, beside the value columns and not one of
+them: a reader that merges rows of one cell weights them by it (format
+version 4 in a file). Needs \code{weights}.}
+
 \item{threads}{Number of threads, or \code{NULL} (default) for
 \code{\link[=a5pyramid_threads]{a5pyramid_threads()}}.}
 }
@@ -76,6 +83,7 @@ and then cell id order:
 \item \code{cell}: the cell, an \link[a5R:a5_cell]{a5R::a5_cell}.
 \item \code{lod}: its LOD (A5 resolution), an integer.
 \item \code{ncell}: the number of leaves it summarises (1 for the leaves).
+\item with \code{weights_type}, the summed weights, named as the weights column.
 \item the value columns, integer for the integer types up to \code{"uint16"}
 and double otherwise.
 }

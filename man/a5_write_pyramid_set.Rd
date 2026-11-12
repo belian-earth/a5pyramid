@@ -16,6 +16,9 @@ a5_write_pyramid_set(
   types = NULL,
   rep_sd = NULL,
   codecs = NULL,
+  storage = NULL,
+  weights_type = NULL,
+  index = c("json", "parquet"),
   compression = c("snappy", "zstd", "none"),
   metadata = NULL,
   threads = NULL
@@ -46,9 +49,11 @@ resolution from 2 up to the leaves'.}
 
 \item{tiers}{A data frame with one row per tier and columns \code{lod_min} and
 \code{lod_max} (the tier's LODs, inclusive), \code{shard_resolution} (from 0 up
-to \code{lod_min}) and optionally \code{tile_size} (default 16384). Between them
-the tiers must hold every level, the leaves included, and each must
-hold at least one. Default: \code{\link[=a5_pyramid_set_tiers]{a5_pyramid_set_tiers()}}.}
+to \code{lod_min}), and optionally \code{tile_size} (default 16384) and
+\code{row_group_size} (default \code{NA}, one tile a row group; see
+\code{\link[=a5_write_pyramid]{a5_write_pyramid()}}). Between them the tiers must hold every level,
+the leaves included, and each must hold at least one. Default:
+\code{\link[=a5_pyramid_set_tiers]{a5_pyramid_set_tiers()}}.}
 
 \item{aggregate}{The reducer for every value column: \code{"mean"} (default)
 or \code{"rep_child"}. See "Reducers".}
@@ -77,6 +82,23 @@ agree.}
 \item{codecs}{Named character vector of codecs for \code{"mean"} columns
 whose values are codes, such as \code{c(embedding = "aef")}. See "Codecs".
 Default \code{NULL}: every column stores its values.}
+
+\item{storage}{Named character vector of how to store vector columns:
+\code{"fixed_binary"} (default), one fixed-length binary value a row, the
+smallest footer and the fastest decode; or \code{"list"}, a Parquet list of
+the elements, dictionary encoded, which engines such as DuckDB read as
+an array column (\code{TINYINT[]}), as the a5embeddings store keeps its
+embeddings (format version 4). Such as \code{c(embedding = "list")}.}
+
+\item{weights_type}{\code{NULL} (default), or a storage type (see "Column
+types") in which to keep each row's summed \code{weights} at every level, as
+a column named as the weights, beside the value columns and not one of
+them: a reader that merges rows of one cell weights them by it (format
+version 4 in a file). Needs \code{weights}.}
+
+\item{index}{\code{"json"} (default) for \code{set.json}, or \code{"parquet"} for
+\code{set.parquet}, a shard table (format version 4; see
+\code{\link[=a5_write_pyramid_set_table]{a5_write_pyramid_set_table()}}).}
 
 \item{compression}{\code{"snappy"} (default), \code{"zstd"} or \code{"none"}. hyparquet
 decodes snappy itself; zstd needs the \code{hyparquet-compressors} package

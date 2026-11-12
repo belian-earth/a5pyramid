@@ -136,6 +136,11 @@
 #' @param codecs Named character vector of codecs for `"mean"` columns
 #'   whose values are codes, such as `c(embedding = "aef")`. See "Codecs".
 #'   Default `NULL`: every column stores its values.
+#' @param weights_type `NULL` (default), or a storage type (see "Column
+#'   types") in which to keep each row's summed `weights` at every level, as
+#'   a column named as the weights, beside the value columns and not one of
+#'   them: a reader that merges rows of one cell weights them by it (format
+#'   version 4 in a file). Needs `weights`.
 #' @param threads Number of threads, or `NULL` (default) for
 #'   [a5pyramid_threads()].
 #'
@@ -144,6 +149,7 @@
 #'   - `cell`: the cell, an [a5R::a5_cell].
 #'   - `lod`: its LOD (A5 resolution), an integer.
 #'   - `ncell`: the number of leaves it summarises (1 for the leaves).
+#'   - with `weights_type`, the summed weights, named as the weights column.
 #'   - the value columns, integer for the integer types up to `"uint16"`
 #'     and double otherwise.
 #'
@@ -177,10 +183,12 @@ a5_pyramid <- function(x,
                        types = NULL,
                        rep_sd = NULL,
                        codecs = NULL,
+                       weights_type = NULL,
                        threads = NULL) {
   aggregate <- rlang::arg_match(aggregate)
   threads <- resolve_threads(threads)
-  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd, codecs)
+  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd, codecs,
+                         weights_type = weights_type)
   out <- rs_call(a5pyramid_build_rs(
     leaves = input$leaves,
     lods = input$lods,
@@ -206,6 +214,14 @@ a5_pyramid <- function(x,
 #' is sparse and fine where it is dense, and keeps every level sorted by
 #' cell id.
 #'
+#' With `row_group_size`, each level is split down the hierarchy into row
+#' groups of at most `row_group_size` rows instead, and each row group into
+#' tiles of `tile_size` rows (the last shorter), each one data page of
+#' every column. Engines that read whole row groups, such as DuckDB over
+#' S3, then make fewer requests, while a browser still reads one tile at a
+#' time: the file carries the Parquet page index, which locates each tile's
+#' pages. Such a file is in format version 4.
+#'
 #' The file's key-value metadata holds a JSON index under `"a5pyramid"`:
 #' the leaves' resolution, the value columns with their types and reducers,
 #' each level's LOD, row count and tiles, and the bounding box of each tile,
@@ -226,9 +242,18 @@ a5_pyramid <- function(x,
 #' @param dest Path of the Parquet file to write. An existing file is
 #'   replaced. The file is written under a temporary name and renamed when
 #'   complete, so a failed or interrupted write leaves no partial file.
-#' @param tile_size The most rows in a tile (row group). Larger tiles mean
-#'   fewer requests and a smaller footer; smaller tiles mean less data
-#'   fetched outside the view. Default: 4096.
+#' @param tile_size The most rows in a tile. Larger tiles mean fewer
+#'   requests and a smaller footer; smaller tiles mean less data fetched
+#'   outside the view. Default: 4096.
+#' @param row_group_size `NULL` (default) for one tile a row group, or the
+#'   most rows in a row group of several tiles, at least `tile_size` (see
+#'   "File layout"). The embeddings store uses 131072 with tiles of 16384.
+#' @param storage Named character vector of how to store vector columns:
+#'   `"fixed_binary"` (default), one fixed-length binary value a row, the
+#'   smallest footer and the fastest decode; or `"list"`, a Parquet list of
+#'   the elements, dictionary encoded, which engines such as DuckDB read as
+#'   an array column (`TINYINT[]`), as the a5embeddings store keeps its
+#'   embeddings (format version 4). Such as `c(embedding = "list")`.
 #' @param compression `"snappy"` (default), `"zstd"` or `"none"`. hyparquet
 #'   decodes snappy itself; zstd needs the `hyparquet-compressors` package
 #'   in the browser.
@@ -260,6 +285,9 @@ a5_write_pyramid <- function(x,
                              rep_sd = NULL,
                              codecs = NULL,
                              tile_size = 4096L,
+                             row_group_size = NULL,
+                             storage = NULL,
+                             weights_type = NULL,
                              compression = c("snappy", "zstd", "none"),
                              metadata = NULL,
                              threads = NULL) {
@@ -271,14 +299,17 @@ a5_write_pyramid <- function(x,
   aggregate <- rlang::arg_match(aggregate)
   compression <- rlang::arg_match(compression)
   tile_size <- check_count(tile_size)
+  row_group_size <- check_row_group_size(row_group_size, tile_size)
   meta <- check_metadata(metadata)
   threads <- resolve_threads(threads)
-  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd, codecs)
+  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd, codecs,
+                         storage = storage, weights_type = weights_type)
   rs_call(a5pyramid_write_rs(
     leaves = input$leaves,
     lods = input$lods,
     dest = path.expand(dest),
     tile_size = tile_size,
+    row_group_size = row_group_size,
     compression = compression,
     meta_keys = meta$keys,
     meta_values = meta$values,
@@ -297,12 +328,12 @@ a5_write_pyramid <- function(x,
 #' tiles to a browser itself, or to hand the pyramid to other Arrow tools.
 #'
 #' Each record batch of the table is one tile, in the order of the file's
-#' row groups: `arrow::as_record_batch_reader(tbl)$batches()[[i]]` holds the
+#' tiles: `arrow::as_record_batch_reader(tbl)$batches()[[i]]` holds the
 #' rows of row group `i - 1` of the same pyramid written with
-#' [a5_write_pyramid()], and the table's
+#' [a5_write_pyramid()] (one tile a row group), and the table's
 #' schema metadata holds the same entries as the file's key-value
 #' metadata: the index under `"a5pyramid"`, whose `tiles` and `tile_bbox`
-#' count record batches here as they count row groups in the file, the A5
+#' count record batches here as they count tiles in the file, the A5
 #' index version under
 #' `"a5_index"`, and `metadata`. The columns and their types are those of
 #' the file (see [a5_write_pyramid()]); [a5R::a5_from_arrow_table()]
@@ -341,6 +372,8 @@ a5_pyramid_arrow <- function(x,
                              rep_sd = NULL,
                              codecs = NULL,
                              tile_size = 4096L,
+                             storage = NULL,
+                             weights_type = NULL,
                              metadata = NULL,
                              threads = NULL) {
   rlang::check_installed("arrow", reason = "to return Arrow tables")
@@ -348,7 +381,8 @@ a5_pyramid_arrow <- function(x,
   tile_size <- check_count(tile_size)
   meta <- check_metadata(metadata)
   threads <- resolve_threads(threads)
-  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd, codecs)
+  input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd, codecs,
+                         storage = storage, weights_type = weights_type)
   stream <- rs_call(a5pyramid_arrow_rs(
     leaves = input$leaves,
     lods = input$lods,
@@ -374,7 +408,9 @@ PYRAMID_TYPES <- c("int8", "int16", "int32", "uint8", "uint16", "uint32", "float
 PYRAMID_REDUCERS <- c("mean", "sum", "min", "max", "mode", "rep_child")
 # the codecs and the storage type of each one's codes
 PYRAMID_CODECS <- c(aef = "int8")
-RESERVED_COLUMNS <- c("cell", "lod", "ncell")
+RESERVED_COLUMNS <- c("cell", "lod", "ncell", "owner")
+VECTOR_STORAGE <- c("fixed_binary", "list")
+SET_TABLE_COLUMNS <- c("tier", "cell", "path", "rows", "tiles", "bytes", "footer_bytes", "west", "south", "east", "north")
 # the A5 index version of the ids, as across the a5R stack
 A5_INDEX <- "1.0"
 
@@ -382,7 +418,8 @@ A5_INDEX <- "1.0"
 #' resolve them to what the Rust entry points take.
 #' @noRd
 pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
-                          rep_sd = NULL, codecs = NULL, call = rlang::caller_env()) {
+                          rep_sd = NULL, codecs = NULL, storage = NULL, weights_type = NULL,
+                          ncell = NULL, call = rlang::caller_env()) {
   check_not_covering(x, call)
   arrow_src <- NULL
   if (is_arrow_data(x)) {
@@ -409,12 +446,23 @@ pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
   if (!is.null(weights)) {
     weights_v <- check_weights(df, cell_name, weights, call)
   }
+  weights_type <- check_weights_type(weights_type, weights, call)
+  ncell_v <- NULL
+  if (!is.null(ncell)) {
+    if (is.null(df) || !rlang::is_string(ncell) || !ncell %in% setdiff(names(df), cell_name)) {
+      a5pyramid_abort("input", "{.arg ncell} must name a column of {.arg x}.", call = call)
+    }
+    if (is.null(arrow_src)) ncell_v <- as.double(df[[ncell]])
+  }
+  # a stored weights column and ncell are not value columns
+  names <- setdiff(names, c(if (nzchar(weights_type)) weights, ncell))
   dims <- vector_dims(df, names)
   reducers_v <- resolve_reducers(names, aggregate, reducers, weights, call, dims = dims)
   types_v <- resolve_types(df, names, types, call, arrow_types = arrow_src$types, dims = dims,
                            arrow_vectors = arrow_src$vectors)
   sd_v <- resolve_sd(rep_sd, names, reducers_v, call)
   codecs_v <- resolve_codecs(codecs, names, reducers_v, types_v, call)
+  storage_v <- resolve_storage(storage, names, dims, call)
 
   # the leaves, converted for the engine: from R vectors, or read from the
   # Arrow data batch by batch without passing through R
@@ -428,7 +476,11 @@ pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
       codecs = unname(codecs_v),
       weights = weights_v,
       sd = sd_v,
-      dims = unname(dims)
+      dims = unname(dims),
+      storage = unname(storage_v),
+      weights_name = if (is.null(weights)) "" else weights,
+      weights_type = weights_type,
+      ncell = ncell_v
     ), call = call)
   } else {
     slot <- a5pyramid_stream_slot_rs()
@@ -442,7 +494,10 @@ pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
       codecs = unname(codecs_v),
       weights = if (is.null(weights)) "" else weights,
       sd = sd_v,
-      dims = unname(dims)
+      dims = unname(dims),
+      storage = unname(storage_v),
+      weights_type = weights_type,
+      ncell = if (is.null(ncell)) "" else ncell
     ), call = call)
   }
   info <- a5pyramid_leaves_info_rs(leaves)
@@ -465,7 +520,12 @@ pyramid_input <- function(x, quos, lods, aggregate, reducers, weights, types,
 #' nullability) or fixed-size binary (`type` "uint8" unless `types` says
 #' "int8"), else `NULL`
 #' @noRd
-arrow_vector_type <- function(type) {
+arrow_vector_type <- function(type, dim = NULL) {
+  if (!is.null(dim) && inherits(type, c("ListType", "LargeListType"))) {
+    elem <- type$value_type$ToString()
+    if (!elem %in% c("int8", "uint8")) return(NULL)
+    return(list(type = elem, dim = as.integer(dim), binary = FALSE))
+  }
   if (inherits(type, "FixedSizeListType")) {
     elem <- type$value_type$ToString()
     if (!elem %in% c("int8", "uint8")) return(NULL)
@@ -527,7 +587,7 @@ arrow_source <- function(x, call) {
   }
   types <- vapply(schema$fields, function(f) f$type$ToString(), character(1))
   names(types) <- schema$names
-  vectors <- lapply(schema$fields, function(f) arrow_vector_type(f$type))
+  vectors <- lapply(schema$fields, function(f) arrow_vector_type(f$type, list_dim(x, f, call)))
   names(vectors) <- schema$names
   cell <- names(types)[types == "uint64"]
   if (length(cell) != 1L) {
@@ -551,6 +611,27 @@ arrow_source <- function(x, call) {
     vectors = vectors,
     proto = tibble::new_tibble(proto, nrow = 0L)
   )
+}
+
+#' The length of a list column's first list (DuckDB's `TINYINT[]`), for a
+#' list of int8 or uint8 in Arrow data that can be read twice; the engine
+#' checks that every row has as many. NULL for other columns.
+#' @noRd
+list_dim <- function(x, field, call) {
+  type <- field$type
+  if (!inherits(type, c("ListType", "LargeListType")) ||
+      !type$value_type$ToString() %in% c("int8", "uint8")) {
+    return(NULL)
+  }
+  if (inherits(x, "RecordBatchReader")) {
+    a5pyramid_abort("input", c(
+      "List column {.field {field$name}} has no length its type states, and a stream cannot be read twice to find it.",
+      "i" = "Cast it to a fixed-size list, or pass a Table or Dataset."
+    ), call = call)
+  }
+  first <- arrow::as_arrow_table(utils::head(x, 1L))[[field$name]]
+  if (is.null(first) || first$length() == 0L) return(NULL)
+  length(first$chunk(0)$as_vector()[[1]])
 }
 
 check_not_covering <- function(x, call) {
@@ -729,6 +810,34 @@ resolve_types <- function(df, names, types, call, arrow_types = NULL, dims = int
 #' Each value column's codec, `""` for none: a codec applies to a
 #' `"mean"` column of its code type
 #' @noRd
+resolve_storage <- function(storage, names, dims, call) {
+  given <- check_named_choice(storage, "storage", names, VECTOR_STORAGE, call)
+  scalar <- names(given)[dims[names(given)] == 0L]
+  if (length(scalar) > 0L) {
+    a5pyramid_abort("input", "{.arg storage} applies to vector columns, but {.field {scalar}} {?is/are} scalar.", call = call)
+  }
+  out <- rep("", length(names))
+  names(out) <- names
+  out[names(given)] <- given
+  out
+}
+
+#' The weights column's type: "" for none, else a storage type; weights
+#' must be given
+#' @noRd
+check_weights_type <- function(weights_type, weights, call) {
+  if (is.null(weights_type)) {
+    return("")
+  }
+  if (is.null(weights)) {
+    a5pyramid_abort("input", "{.arg weights_type} stores the weights, so {.arg weights} must name them.", call = call)
+  }
+  if (!rlang::is_string(weights_type) || !weights_type %in% PYRAMID_TYPES) {
+    a5pyramid_abort("input", "{.arg weights_type} must be one of {.val {PYRAMID_TYPES}}.", call = call)
+  }
+  weights_type
+}
+
 resolve_codecs <- function(codecs, names, reducers, types, call) {
   given <- check_named_choice(codecs, "codecs", names, names(PYRAMID_CODECS), call)
   out <- rep("", length(names))

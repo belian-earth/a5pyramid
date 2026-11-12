@@ -26,6 +26,7 @@ reference:
   - a5_pyramid
   - a5_pyramid_arrow
   - a5_write_pyramid
+  - a5_write_pyramid_level
 - title: Reading pyramids
   desc: A file's index and levels, read as a renderer reads them.
   contents:
@@ -37,6 +38,7 @@ reference:
   - a5_write_pyramid_set
   - a5_pyramid_set_tiers
   - a5_pyramid_set_info
+  - a5_write_pyramid_set_table
 - title: Configuration
   contents:
   - a5pyramid_threads

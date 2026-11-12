@@ -6,20 +6,22 @@ use std::collections::HashSet;
 use rayon::prelude::*;
 
 use crate::cancel::Cancel;
-use crate::column::{Codec, Column, ColumnSpec, ColumnType, Reducer, VectorColumn, VectorSpec};
+use crate::column::{Codec, Column, ColumnSpec, ColumnType, Reducer, VectorColumn, VectorSpec, WeightsSpec};
 use crate::error::{invalid, Error, Result};
 use crate::RESERVED_COLUMNS;
 
 /// The data a pyramid is built from: cells at one resolution, value columns
 /// and vector columns aligned with them, and optional non-negative weights
 /// for means, modes and the representative leaf (NaN weights count as
-/// zero).
+/// zero). With `weights_column`, every level also stores each row's summed
+/// weights under that name.
 #[derive(Clone, Debug, Default)]
 pub struct Leaves {
     pub cells: Vec<u64>,
     pub columns: Vec<Column>,
     pub vectors: Vec<VectorColumn>,
     pub weights: Option<Vec<f64>>,
+    pub weights_column: Option<WeightsSpec>,
 }
 
 /// One level of detail: its cells in ascending id order, the number of
@@ -33,6 +35,9 @@ pub struct Level {
     pub values: Vec<Vec<f64>>,
     /// One per vector column: `dim` bytes per cell, row by row.
     pub vectors: Vec<Vec<u8>>,
+    /// The summed weights of each row's leaves, quantised to the pyramid's
+    /// [`WeightsSpec`]; empty without one.
+    pub weights: Vec<f64>,
 }
 
 impl Level {
@@ -51,6 +56,8 @@ pub struct Pyramid {
     pub data_resolution: i32,
     pub columns: Vec<ColumnSpec>,
     pub vectors: Vec<VectorSpec>,
+    /// The stored weights column, if any.
+    pub weights: Option<WeightsSpec>,
     pub levels: Vec<Level>,
 }
 
@@ -85,11 +92,13 @@ pub fn build(leaves: Leaves, lods: &[i32], cancel: &Cancel) -> Result<Pyramid> {
         columns,
         vectors,
         weights,
+        weights_column,
     } = leaves;
     let n = cells.len();
     if n == 0 {
         return Err(invalid("no cells to build a pyramid from"));
     }
+    check_weights_column(weights_column.as_ref(), weights.is_some(), &columns, &vectors)?;
     if n > u32::MAX as usize {
         return Err(invalid(format!(
             "{n} cells is more than a pyramid can hold ({})",
@@ -127,6 +136,7 @@ pub fn build(leaves: Leaves, lods: &[i32], cancel: &Cancel) -> Result<Pyramid> {
             &columns,
             &vectors,
             weights.as_deref(),
+            weights_column.as_ref(),
             &rep,
             lod,
             cancel,
@@ -135,19 +145,141 @@ pub fn build(leaves: Leaves, lods: &[i32], cancel: &Cancel) -> Result<Pyramid> {
     levels.reverse();
     let specs = columns.iter().map(|c| c.spec.clone()).collect();
     let vector_specs = vectors.iter().map(|v| v.spec.clone()).collect();
+    let leaf_weights = match (&weights_column, weights) {
+        (Some(spec), Some(w)) => w.into_iter().map(|x| spec.ty.quantise(x)).collect(),
+        _ => Vec::new(),
+    };
     levels.push(Level {
         lod: data_resolution,
         ncell: vec![1; n],
         values: columns.into_iter().map(|c| c.values).collect(),
         vectors: vectors.into_iter().map(|v| v.values).collect(),
+        weights: leaf_weights,
         cells,
     });
     Ok(Pyramid {
         data_resolution,
         columns: specs,
         vectors: vector_specs,
+        weights: weights_column,
         levels,
     })
+}
+
+impl Pyramid {
+    /// A pyramid of one level from precomputed rows, not built from leaves:
+    /// `rows` holds the level's cells (one resolution, `lod`, unique), value
+    /// and vector columns, and with `weights_column` the rows' summed
+    /// weights in `weights`; `ncell` the leaves each row summarises (`None`
+    /// at the leaves, where it is 1). Rows are sorted by cell and values
+    /// quantised to their types; the reducers and codecs are recorded, not
+    /// applied. Use it to write a shard whose rows were reduced elsewhere,
+    /// such as a partition's partial rows.
+    pub fn from_rows(rows: Leaves, ncell: Option<Vec<u32>>, data_resolution: i32) -> Result<Pyramid> {
+        let Leaves {
+            cells,
+            columns,
+            vectors,
+            weights,
+            weights_column,
+        } = rows;
+        let n = cells.len();
+        if n == 0 {
+            return Err(invalid("no rows to make a level of"));
+        }
+        if n > u32::MAX as usize {
+            return Err(invalid(format!(
+                "{n} rows is more than a level can hold ({})",
+                u32::MAX
+            )));
+        }
+        check_columns(&columns, n)?;
+        check_vectors(&vectors, &columns, n)?;
+        check_weights_column(weights_column.as_ref(), weights.is_some(), &columns, &vectors)?;
+        if weights.is_some() && weights_column.is_none() {
+            return Err(invalid(
+                "rows carry their weights only to store them: name the weights column",
+            ));
+        }
+        let weights = check_weights(weights, n)?;
+        let lod = check_cells(&cells)?;
+        if !(0..=30).contains(&data_resolution) || lod > data_resolution {
+            return Err(invalid(format!(
+                "rows at resolution {lod} cannot belong to a pyramid with leaves at {data_resolution}"
+            )));
+        }
+        let ncell = match ncell {
+            Some(v) if v.len() != n => return Err(invalid(format!("{} ncell values for {n} rows", v.len()))),
+            Some(v) if v.contains(&0) => return Err(invalid("every row summarises at least one leaf: ncell 0")),
+            Some(v) => v,
+            None if lod == data_resolution => vec![1; n],
+            None => {
+                return Err(invalid(format!(
+                    "rows at resolution {lod}, coarser than the leaves at {data_resolution}, need their ncell"
+                )))
+            }
+        };
+        if lod == data_resolution && ncell.iter().any(|&c| c != 1) {
+            return Err(invalid(
+                "a row at the leaves' resolution summarises exactly one leaf: ncell 1",
+            ));
+        }
+        // sorted as the leaves are, ncell travelling as a column
+        let mut cols = columns;
+        cols.push(Column::new(
+            " ncell",
+            ColumnType::UInt32,
+            Reducer::Sum,
+            ncell.iter().map(|&c| c as f64).collect(),
+        ));
+        let (cells, mut cols, vectors, weights) = sort_leaves(cells, cols, vectors, weights)?;
+        let ncell: Vec<u32> = cols.pop().unwrap().values.into_iter().map(|c| c as u32).collect();
+        for col in &mut cols {
+            let ty = col.spec.ty;
+            col.values.par_iter_mut().for_each(|v| *v = ty.quantise(*v));
+        }
+        let weights = match (&weights_column, weights) {
+            (Some(spec), Some(w)) => w.into_iter().map(|x| spec.ty.quantise(x)).collect(),
+            _ => Vec::new(),
+        };
+        Ok(Pyramid {
+            data_resolution,
+            columns: cols.iter().map(|c| c.spec.clone()).collect(),
+            vectors: vectors.iter().map(|v| v.spec.clone()).collect(),
+            weights: weights_column,
+            levels: vec![Level {
+                lod,
+                cells,
+                ncell,
+                values: cols.into_iter().map(|c| c.values).collect(),
+                vectors: vectors.into_iter().map(|v| v.values).collect(),
+                weights,
+            }],
+        })
+    }
+}
+
+/// A weights column needs the weights, and a name of its own.
+fn check_weights_column(
+    spec: Option<&WeightsSpec>,
+    have: bool,
+    columns: &[Column],
+    vectors: &[VectorColumn],
+) -> Result<()> {
+    let Some(spec) = spec else { return Ok(()) };
+    if !have {
+        return Err(invalid(format!("the weights column {:?} needs weights", spec.name)));
+    }
+    let name = spec.name.as_str();
+    if name.is_empty() || RESERVED_COLUMNS.contains(&name) {
+        return Err(invalid(format!("the weights column cannot be named {name:?}")));
+    }
+    if columns.iter().any(|c| c.spec.name == name) || vectors.iter().any(|v| v.spec.name == name) {
+        return Err(invalid(format!(
+            "the weights column {name:?} has the name of a value column; it is stored beside them"
+        )));
+    }
+    Ok(())
 }
 
 fn check_columns(columns: &[Column], n: usize) -> Result<()> {
@@ -500,11 +632,13 @@ fn leaf_sd(v: &[f64]) -> f64 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_level(
     cells: &[u64],
     columns: &[Column],
     vectors: &[VectorColumn],
     weights: Option<&[f64]>,
+    weights_column: Option<&WeightsSpec>,
     rep: &RepSpec,
     lod: i32,
     cancel: &Cancel,
@@ -612,12 +746,21 @@ fn build_level(
         cancel.check()?;
     }
 
+    let out_weights: Vec<f64> = match (weights_column, weights) {
+        (Some(spec), Some(w)) => (0..n_groups)
+            .into_par_iter()
+            .map(|g| spec.ty.quantise(group(g).iter().map(|&(_, i)| w[i as usize]).sum()))
+            .collect(),
+        _ => Vec::new(),
+    };
+
     Ok(Level {
         lod,
         cells: out_cells,
         ncell,
         values,
         vectors: out_vectors,
+        weights: out_weights,
     })
 }
 

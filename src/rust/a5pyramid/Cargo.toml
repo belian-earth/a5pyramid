@@ -16,6 +16,8 @@ a5 = '=1.0.0'
 arrow-array = '60'
 arrow-buffer = '60'
 arrow-schema = '60'
+# already in the tree through parquet: concatenating a shard table's row groups
+arrow-select = '60'
 parquet = { version = '60', default-features = false, features = ['arrow', 'snap', 'zstd'] }
 rayon = '1.11'
 serde = { version = '1', features = ['derive'] }

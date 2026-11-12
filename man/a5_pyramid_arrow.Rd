@@ -15,6 +15,8 @@ a5_pyramid_arrow(
   rep_sd = NULL,
   codecs = NULL,
   tile_size = 4096L,
+  storage = NULL,
+  weights_type = NULL,
   metadata = NULL,
   threads = NULL
 )
@@ -68,9 +70,22 @@ agree.}
 whose values are codes, such as \code{c(embedding = "aef")}. See "Codecs".
 Default \code{NULL}: every column stores its values.}
 
-\item{tile_size}{The most rows in a tile (row group). Larger tiles mean
-fewer requests and a smaller footer; smaller tiles mean less data
-fetched outside the view. Default: 4096.}
+\item{tile_size}{The most rows in a tile. Larger tiles mean fewer
+requests and a smaller footer; smaller tiles mean less data fetched
+outside the view. Default: 4096.}
+
+\item{storage}{Named character vector of how to store vector columns:
+\code{"fixed_binary"} (default), one fixed-length binary value a row, the
+smallest footer and the fastest decode; or \code{"list"}, a Parquet list of
+the elements, dictionary encoded, which engines such as DuckDB read as
+an array column (\code{TINYINT[]}), as the a5embeddings store keeps its
+embeddings (format version 4). Such as \code{c(embedding = "list")}.}
+
+\item{weights_type}{\code{NULL} (default), or a storage type (see "Column
+types") in which to keep each row's summed \code{weights} at every level, as
+a column named as the weights, beside the value columns and not one of
+them: a reader that merges rows of one cell weights them by it (format
+version 4 in a file). Needs \code{weights}.}
 
 \item{metadata}{Named character vector or list of strings to add to the
 file's key-value metadata, such as a renderer's settings as JSON. The
@@ -91,12 +106,12 @@ tiles to a browser itself, or to hand the pyramid to other Arrow tools.
 }
 \details{
 Each record batch of the table is one tile, in the order of the file's
-row groups: \code{arrow::as_record_batch_reader(tbl)$batches()[[i]]} holds the
+tiles: \code{arrow::as_record_batch_reader(tbl)$batches()[[i]]} holds the
 rows of row group \code{i - 1} of the same pyramid written with
-\code{\link[=a5_write_pyramid]{a5_write_pyramid()}}, and the table's
+\code{\link[=a5_write_pyramid]{a5_write_pyramid()}} (one tile a row group), and the table's
 schema metadata holds the same entries as the file's key-value
 metadata: the index under \code{"a5pyramid"}, whose \code{tiles} and \code{tile_bbox}
-count record batches here as they count row groups in the file, the A5
+count record batches here as they count tiles in the file, the A5
 index version under
 \code{"a5_index"}, and \code{metadata}. The columns and their types are those of
 the file (see \code{\link[=a5_write_pyramid]{a5_write_pyramid()}}); \code{\link[a5R:a5_from_arrow_table]{a5R::a5_from_arrow_table()}}

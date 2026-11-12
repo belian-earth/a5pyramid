@@ -52,6 +52,21 @@ check_count <- function(x, arg = rlang::caller_arg(x), min = 1L, call = rlang::c
   as.integer(x)
 }
 
+#' `row_group_size` for the engine: 0 for one tile a row group, else a
+#' whole number of at least `tile_size`
+#' @noRd
+check_row_group_size <- function(x, tile_size, arg = rlang::caller_arg(x), call = rlang::caller_env()) {
+  if (is.null(x)) {
+    return(0L)
+  }
+  ok <- is.numeric(x) && length(x) == 1L && !is.na(x) && x == trunc(x) && x >= tile_size &&
+    x <= .Machine$integer.max
+  if (!ok) {
+    a5pyramid_abort("input", "{.arg {arg}} must be {.code NULL} or a whole number of at least {.arg tile_size} ({tile_size}).", call = call)
+  }
+  as.integer(x)
+}
+
 #' Validate a user-supplied bbox: `c(xmin, ymin, xmax, ymax)` in WGS 84,
 #' with `xmin > xmax` for a box across the antimeridian.
 #' @noRd

@@ -1,4 +1,4 @@
-# The a5pyramid file format, version 3
+# The a5pyramid file format, version 4
 
 An a5pyramid file is one Parquet file holding [A5](https://a5geo.org/) cells
 at one resolution (the *leaves*, with their values) and coarser *levels of
@@ -9,9 +9,15 @@ requests.
 
 A pyramid too large for one file is stored as a *pyramid set*: a directory
 of a5pyramid files, *shards*, each holding some LODs of the cells around one
-coarse cell, and an index, `set.json` (see "Pyramid sets"). Version 2 adds
-sets; a single file is unchanged from version 1. Version 3 adds vector
-columns (see "Vector columns"), such as embeddings.
+coarse cell, and an index, `set.json` or `set.parquet` (see "Pyramid
+sets"). Version 2 adds sets; a single file is unchanged from version 1.
+Version 3 adds vector columns (see "Vector columns"), such as embeddings.
+Version 4 serves a store that engines and browsers read alike: row groups
+of several tiles, each one data page (see "Row groups of several tiles");
+vectors stored as lists; a weights column; shards whose rows may be
+partial, with an `owner` column (see "Partial rows"); files without `lod`
+or `ncell` where those say nothing; and a set's index as a Parquet table
+that can list empty shards (see "Shard tables").
 
 The same layout also exists in memory as Arrow record batches (see "The
 Arrow form"), for clients that take a pyramid without a file.
@@ -22,13 +28,18 @@ R package built on it) and readers (renderers). Key words follow RFC 2119.
 ## Versions
 
 A writer records in `format_version` the oldest version whose rules a file
-follows: 1 for a single file, 2 for a shard of a set, and 3 for either when
-it has a vector column (and for the `set.json` of a set whose shards have
-one). A reader that supports a version reads every older one. A version-1
-reader refuses shards, as it must, because a shard breaks two version-1
-rules: its finest level need not be the leaves, and its levels hold only the
-cells it owns. A version-2 reader refuses files with vector columns, whose
-type it does not know.
+follows: 1 for a single file, 2 for a shard of a set, 3 for either when it
+has a vector column, and 4 for either when it uses any of version 4's
+features: a row group of several tiles, a list vector, a weights column, an
+`owner` column, or no `lod` or `ncell` column. A set's index takes the
+newest version of its shards, and 4 when it is a shard table or lists an
+empty shard. A reader that supports a version reads every older one. A
+version-1 reader refuses shards, as it must, because a shard breaks two
+version-1 rules: its finest level need not be the leaves, and its levels
+hold only the cells it owns. A version-2 reader refuses files with vector
+columns, whose type it does not know. A version-3 reader refuses version 4
+files: it would read row group `i` as tile `i`, expect columns that may be
+absent, and draw a partial row as a whole cell.
 
 ## Reading a file
 
@@ -42,8 +53,10 @@ type it does not know.
    resolution that suits the zoom, else the coarsest level.
 4. Take that level's tiles (`levels[i].tiles`, a half-open range) and keep
    those whose box in `tile_bbox` meets the viewport.
-5. Fetch and decode those tiles' row groups. Draw each `cell` from its
-   boundary (a5-js `cellToBoundary`), coloured from the value columns.
+5. Fetch and decode those tiles: each tile's row group, or in a row group
+   of several tiles its data page of every column chunk (see "Row groups of
+   several tiles"). Draw each `cell` from its boundary (a5-js
+   `cellToBoundary`), coloured from the value columns.
 
 A reader never needs to decode a tile to decide whether to fetch it.
 
@@ -52,9 +65,14 @@ A reader never needs to decode a tile to decide whether to fetch it.
 | Column | Parquet type | Arrow type | Content |
 |---|---|---|---|
 | `cell` | `INT64`, `INTEGER(64, false)` | `uint64` | A5 cell id. Never null. |
-| `lod` | `INT32`, `INTEGER(8, false)` | `uint8` | The cell's resolution, the row's level. Never null. |
-| `ncell` | `INT32`, `INTEGER(32, false)` | `uint32` | The number of leaves the row summarises; 1 at the leaves. Never null. |
+| `lod` | `INT32`, `INTEGER(8, false)` | `uint8` | The cell's resolution, the row's level. Never null. Version 4: absent from a file of one level, whose level the index gives. |
+| `ncell` | `INT32`, `INTEGER(32, false)` | `uint32` | The number of leaves the row summarises; 1 at the leaves. Never null. Version 4: absent from a file whose rows are all leaves; each counts 1. |
+| `owner` | `INT64`, `INTEGER(64, false)` | `uint64` | Version 4, shards with `owner` in the index only: the cell at the shard resolution containing the row cell's centre (see "Partial rows"). Never null. |
+| weights | an integer or float type | as for value columns | Version 4, with `weights` in the index only: the row's leaves' summed weights, named and typed as the index says. Not a value column: renderers do not read it. Never null. |
 | value columns | see below | see below | One per column in the index's `columns`, in that order: the scalar columns, then the vector columns. Null where missing (vectors are never missing). |
+
+The columns follow each other in this order; readers SHOULD find them by
+name.
 
 Value column types (`type` in the index) are `int8`, `int16`, `int32`,
 `uint8`, `uint16`, `uint32`, `float32` and `float64`, stored as the matching
@@ -62,7 +80,9 @@ Parquet `INT32`/`FLOAT`/`DOUBLE` physical type with an `INTEGER` logical type
 for the integer types. hyparquet decodes `cell` as `BigInt` and every other
 column as `Number`.
 
-The names `cell`, `lod` and `ncell` are reserved: no value column takes them.
+The names `cell`, `lod`, `ncell` and `owner` are reserved: no value column
+or weights column takes them, and the weights column's name is no value
+column's.
 
 ### Vector columns
 
@@ -75,6 +95,17 @@ grow the footer by `dim` times as much. Byte `e` of a row is element `e`, as
 its two's complement for `int8`. hyparquet returns each row as a
 `Uint8Array` of `dim` bytes; read `int8` elements through an `Int8Array`
 view of the same bytes. A vector is never null.
+
+A vector column may instead (version 4) be stored as a Parquet `LIST` of
+`dim` elements, with `"storage": "list"` in its index entry: a required
+list of required `INT32` elements with an `INTEGER(8, true)` or
+`INTEGER(8, false)` logical type, dictionary encoded. Engines read it as an
+array column (DuckDB's `TINYINT[]`), which is how the a5embeddings store
+keeps its embeddings, and under Zstandard it is about 55 bytes a 64-element
+row against 77 for fixed-length binary (the dictionary's indices compress
+better than the bytes). Every row holds exactly `dim` elements. hyparquet
+returns each row as an array of numbers; a renderer can also decode the
+pages' values directly.
 
 A vector column is reduced by `rep_child` or by `mean` (see "Levels").
 
@@ -97,9 +128,11 @@ do); with scalar `rep_child` columns beside it, fix the `sd`s as for any
 
 ## Tiles
 
-A *tile* is the unit a reader fetches: one row group of the Parquet file, one
-record batch of the Arrow form. Tiles are numbered in order from 0, so tile
-`i` is row group `i` and record batch `i`.
+A *tile* is the unit a reader fetches: one record batch of the Arrow form
+and, in the Parquet file, one row group or (version 4) one data page of
+every column chunk of a row group of several tiles. Tiles are numbered in
+order from 0, so tile `i` is record batch `i`, and row group `i` where every
+row group is one tile.
 
 - Every tile holds rows of one level.
 - Levels follow each other in ascending `lod` order, the leaves last.
@@ -116,7 +149,38 @@ Readers SHOULD NOT depend on how tiles are chosen beyond these properties.
 
 Parquet chunk statistics (min and max) are written for `cell` and `lod`, and
 for no other column. A reader can find the tile holding a given cell by
-binary search over the `cell` statistics of its level's row groups.
+binary search over the `cell` statistics of its level's row groups, and in
+a row group of several tiles over its pages' (the column index).
+
+### Row groups of several tiles
+
+An engine such as DuckDB reading a store over S3 makes a request per column
+chunk it reads, so many small row groups make a scan slow, while a browser
+wants small tiles. A version-4 file serves both: its row groups are large,
+and each is cut into tiles that are its data pages. The index then has
+`row_group_size`, the most rows a row group holds.
+
+- A row group holds rows of one level. A writer splits each level into row
+  groups as it would into tiles, with `row_group_size` in place of
+  `tile_size`, so a row group is a run of consecutive cell ids.
+- Row group `g` of `n_g` rows holds `ceil(n_g / tile_size)` consecutive
+  tiles: its tile `k` is its rows `k * tile_size` up to `(k + 1) * tile_size`,
+  the last tile fewer. Tiles are numbered across row groups in file order,
+  so the footer's row counts place every tile.
+- Each tile is exactly one data page of every column chunk: data page `k`
+  of a chunk holds tile `k` of its row group. Data pages are version 1. A
+  column with a dictionary (`lod`) has one dictionary page before its data
+  pages, which serves every tile of the row group.
+- The file has the Parquet page index: an offset index for every column
+  chunk, giving each data page's offset, size and first row, and a column
+  index for `cell`, giving each page's least and greatest cell. It lies
+  between the last column chunk and the footer.
+
+A reader fetches a tile as its data page of each column chunk it needs, found
+in the offset index, with that column's dictionary page where it has one.
+Tiles here are cut by row count, not down the A5 hierarchy: a run of
+consecutive ids is still a compact patch, but tiles do not follow the
+hierarchy as the tiles of a version 1 to 3 file do.
 
 ## Key-value metadata
 
@@ -165,14 +229,41 @@ The index of a small file (1,024 leaves at resolution 15, levels at 11 and
 | `a5_crate` | The version of the a5 Rust crate that computed the levels and boxes. |
 | `data_resolution` | The leaves' resolution. In a single file it is the finest level's `lod`; a shard of a tier coarser than the leaves holds no level at it. |
 | `tile_size` | The most rows in a tile. |
+| `row_group_size` | Version 4: the most rows in a row group, where some row group holds several tiles (see "Row groups of several tiles"). Absent where every row group is one tile. |
+| `weights` | Version 4: `{"name", "type"}`, the weights column (see "Columns"). Absent where the file stores no weights. |
+| `owner` | Version 4, shards only: `true` where the file has an `owner` column and its rows may be partial (see "Partial rows"). Absent otherwise. |
 | `bbox` | `[west, south, east, north]` (see "Boxes"): in a single file, of the leaves; in a shard, of every tile, since coarse cells reach past the leaves under them. |
-| `columns` | The value columns in column order: `name`, storage `type` and `reducer` (see "Levels"), and for a `rep_child` column `sd`, the standard deviation that scaled it (1 where the leaves' standard deviation is 0 or undefined, as for a constant column, so `sd` is the scale used rather than a statistic of the data). `sd` is optional (absent before 2026-11-09), and readers that do not choose representatives ignore it. A `mean` column of codes has `codec`, how its codes map to values (see "Codecs"); the field is optional, added without a version change (absent before 2026-11-11 and for columns that store their values), and a reader that ignores it reads the codes. A vector column (version 3) also has `dim`, its elements per row. |
+| `columns` | The value columns in column order: `name`, storage `type` and `reducer` (see "Levels"), and for a `rep_child` column `sd`, the standard deviation that scaled it (1 where the leaves' standard deviation is 0 or undefined, as for a constant column, so `sd` is the scale used rather than a statistic of the data). `sd` is optional (absent before 2026-11-09), and readers that do not choose representatives ignore it. A `mean` column of codes has `codec`, how its codes map to values (see "Codecs"); the field is optional, added without a version change (absent before 2026-11-11 and for columns that store their values), and a reader that ignores it reads the codes. A vector column (version 3) also has `dim`, its elements per row, and (version 4) `"storage": "list"` where it is stored as a list. |
 | `levels` | One entry per level, ascending `lod`: its `lod`, its number of `rows`, and the half-open range `[start, end)` of its tiles. Consecutive levels' ranges meet, and together cover every tile. |
 | `tile_bbox` | The box of every tile in order, flat: tile `i` is at indices `4i` to `4i + 3`. |
 | `shard` | Shards only (version 2): `{"tier", "cell", "resolution"}`, the shard's tier, its shard cell as 16 hex digits, and that cell's resolution. Absent in a single file. |
 
 Writers before 2026-11-09 named `tiles` `row_groups` and `tile_bbox`
 `row_group_bbox`, with the same meaning. Readers MAY accept those names.
+
+## Partial rows
+
+A set whose shards are built apart, each from its own leaves, cannot give
+every cell one row: a coarse cell can have leaves in several shards. Such a
+shard (version 4) has an `owner` column and `"owner": true` in its index.
+
+- Each row summarises the shard's own leaves under its cell. A cell with
+  leaves in several shards has a *partial row* in each, and its `ncell` and
+  weights there count that shard's leaves only.
+- `owner` is the cell at the shard resolution containing the row cell's
+  centre: the shard that would hold the cell's one row were the set built
+  whole. A row whose `owner` is its shard's cell is its *owned row*; a cell
+  can have none, where no leaf of it lies in its owner.
+- Across the shards of a tier, a cell's rows' `ncell` sum to its leaves,
+  and so do their weights.
+- **Drawing.** A renderer draws every row. A split cell is then drawn once
+  for each shard holding it, one over the other, showing one of its partial
+  values; this leaves no gap where an owner shard is missing or holds none
+  of the cell's leaves.
+- **Merging.** A reader that wants whole cells merges each cell's rows:
+  with a codec, it decodes their values, takes their mean weighted by the
+  weights column (or by `ncell`) and encodes it, as "Codecs" says of
+  stored cells.
 
 ## Boxes
 
@@ -252,21 +343,25 @@ and encodes it, rather than averaging the codes.
 - `cell` and `ncell` are `DELTA_BINARY_PACKED`: a tile's ids are sorted and
   close together, so this stores `cell` in about 3 bytes per row rather
   than 8.
-- `lod` is dictionary encoded (it is constant in a tile).
-- Value columns are `PLAIN`.
+- `lod` is dictionary encoded (it is constant in a tile), as are `owner`
+  and the weights column (few distinct values) and list vectors (see
+  "Vector columns").
+- Value columns and fixed-length binary vectors are `PLAIN`.
+- Data pages are version 1. Version 2 pages store repetition and
+  definition levels uncompressed, which costs a list column about 7%.
 - The default compression is Snappy, which hyparquet decodes without extra
   libraries. Writers may use Zstandard (hyparquet needs
   `hyparquet-compressors`) or none.
-- No page index is written.
+- No page index is written, except in a file of row groups of several
+  tiles, which needs one.
 
 ## The Arrow form
 
 A pyramid in memory is a sequence of Arrow record batches with the layout of
 the file:
 
-- Each record batch is one tile: batch `i` holds exactly the rows of row
-  group `i` of the same pyramid's file, and every rule under "Tiles"
-  applies.
+- Each record batch is one tile: batch `i` holds exactly the rows of tile
+  `i` of the same pyramid's file, and every rule under "Tiles" applies.
 - The columns and their Arrow types are those under "Columns".
 - The schema metadata holds the entries under "Key-value metadata", the
   index unchanged.
@@ -364,30 +459,60 @@ of its six shards shown:
 | Field | Meaning |
 |---|---|
 | `format` | `"a5pyramid-set"`. Readers MUST refuse any other. |
-| `format_version` | 2, this document's version for sets. Readers MUST refuse newer versions. |
+| `format_version` | 2, or 3 or 4 where a shard needs it (see "Versions"). Readers MUST refuse newer versions. |
 | `generator`, `a5_crate`, `data_resolution`, `columns` | As in a shard's index, the same for every shard. |
 | `a5_index` | The A5 index version of every shard's ids, as in each shard's `a5_index` metadata. |
-| `tiers` | In ascending LOD order; a tier's number is its position, from 0. `lods` is inclusive. |
+| `tiers` | In ascending LOD order; a tier's number is its position, from 0. `lods` is inclusive. A tier whose shards have row groups of several tiles has `row_group_size`. |
 | `bbox` | The box of every shard's box. |
-| `shards` | Every shard, by tier and then shard cell: `tier`; `cell` (16 hex digits); `path`, relative to the set's directory with `/` separators; `rows`; `tiles`; `bytes`, the file's size; `footer_bytes`; and `bbox`, the shard's box. |
+| `weights` | Version 4: the weights column every shard stores, as in a shard's index. |
+| `shards` | Every shard, by tier and then shard cell: `tier`; `cell` (16 hex digits); `path`, relative to the set's directory with `/` separators; `rows`; `tiles`; `bytes`, the file's size; `footer_bytes`; and `bbox`, the shard's box. Version 4: a shard listed as empty, with no file, has `path` and `bbox` null and 0 for the rest. |
 | `metadata` | The writer's other metadata, an object of strings. |
 
 `footer_bytes` counts from the end of the last column chunk to the end of
-the file: the Parquet metadata (the shard's index included), its 4-byte
-length and the closing `PAR1`. A reader that fetches the last
-`footer_bytes` bytes has the whole footer in one request.
+the file: the page index where there is one, the Parquet metadata (the
+shard's index included), its 4-byte length and the closing `PAR1`. A reader
+that fetches the last `footer_bytes` bytes has the whole footer, and any
+page index, in one request.
+
+### Shard tables
+
+A set's index can instead be a Parquet table, `set.parquet` (version 4), one
+row per shard. Readers filter its rows by tier and box with row-group
+statistics, and a writer can keep columns of its own beside the format's,
+such as a build name or a year, so that a store's manifest is its set's
+index and a service can hand a client some rows of it.
+
+| Column | Type | Content |
+|---|---|---|
+| `tier` | `uint16` | The shard's tier. |
+| `cell` | `uint64` | The shard cell. |
+| `path` | string, null for an empty shard | As in `set.json`. |
+| `rows`, `tiles`, `bytes`, `footer_bytes` | `uint64`, `uint32`, `uint64`, `uint64` | As in `set.json`; 0 for an empty shard. |
+| `west`, `south`, `east`, `north` | `double`, null for an empty shard | The shard's box, unwrapped: `east` is above 180 for a box across the antimeridian, so a row group's least and greatest values bound its rows. |
+| the writer's columns | any | Opaque to this format; readers ignore them. |
+
+- Rows are sorted by `tier` and then `cell`, each shard once. Row groups
+  hold at most 1,024 rows, with statistics on `tier` and the box columns.
+- The footer's key-value metadata holds `a5pyramid_set`, the set's fields
+  as in `set.json` with `shards` empty, and `a5_index`.
+- A reader testing a view against unwrapped boxes tests it as given and
+  shifted by 360°.
+- A set's directory holds `set.json` or `set.parquet`; a service may serve
+  a table's rows by other means, as JSON with signed URLs in place of
+  paths, so long as a reader gets the set's fields and its shards' rows.
 
 ### Reading a set
 
-1. Fetch `set.json`. Refuse it if `format` is not `"a5pyramid-set"`,
-   `format_version` is newer than the reader supports, or `a5_index` is not
-   the reader's A5 index version.
+1. Fetch `set.json` (or the shard table's footer and rows). Refuse it if
+   `format` is not `"a5pyramid-set"`, `format_version` is newer than the
+   reader supports, or `a5_index` is not the reader's A5 index version.
 2. Pick a LOD for the view, as for a single file, and the tier holding it.
-3. Take the tier's shards whose `bbox` meets the viewport, and open each
-   (once; cache it): fetch its last `footer_bytes` bytes and read its index.
+3. Take the tier's shards with a file whose box meets the viewport, and
+   open each (once; cache it): fetch its last `footer_bytes` bytes and read
+   its index.
 4. In each, take the level's tiles whose boxes meet the viewport and fetch
    them, as in a single file. Tiles of different shards never hold the same
-   cell.
+   cell, except partial rows (see "Partial rows"), which are all drawn.
 
 ## Reading with hyparquet
 
@@ -398,11 +523,15 @@ const file = await asyncBufferFromUrl({ url });
 const metadata = await parquetMetadataAsync(file);
 const kv = Object.fromEntries(metadata.key_value_metadata.map((e) => [e.key, e.value]));
 const index = JSON.parse(kv.a5pyramid);
-if (index.format_version > 2 || kv.a5_index !== "1.0") throw new Error("unsupported pyramid");
+if (index.format_version > 4 || kv.a5_index !== "1.0") throw new Error("unsupported pyramid");
 
-// row offsets of each tile (row group)
+// row offsets of each tile: a row group, or tile_size rows of one
 const rowStart = [0];
-for (const rg of metadata.row_groups) rowStart.push(rowStart.at(-1) + Number(rg.num_rows));
+for (const rg of metadata.row_groups) {
+  const n = Number(rg.num_rows);
+  const step = index.row_group_size ? index.tile_size : n;
+  for (let k = 0; k < n; k += step) rowStart.push(rowStart.at(-1) + Math.min(step, n - k));
+}
 
 function intervals([west, , east]) {
   return west > east ? [[west, 180], [-180, east]] : [[west, east]];
@@ -415,10 +544,13 @@ function meets(a, b) {
 async function rowsInView(lod, view /* [west, south, east, north] */) {
   const level = index.levels.find((l) => l.lod === lod);
   const out = [];
-  for (let rg = level.tiles[0]; rg < level.tiles[1]; rg++) {
-    const box = index.tile_bbox.slice(4 * rg, 4 * rg + 4);
+  for (let t = level.tiles[0]; t < level.tiles[1]; t++) {
+    const box = index.tile_bbox.slice(4 * t, 4 * t + 4);
     if (!meets(box, view)) continue;
-    out.push(await parquetReadObjects({ file, metadata, rowStart: rowStart[rg], rowEnd: rowStart[rg + 1] }));
+    // useOffsetIndex: fetch only the tile's pages of a row group of several
+    out.push(await parquetReadObjects({
+      file, metadata, rowStart: rowStart[t], rowEnd: rowStart[t + 1], useOffsetIndex: true,
+    }));
   }
   return out.flat(); // rows: { cell: BigInt, lod, ncell, ...values }
 }
@@ -429,5 +561,6 @@ A shard opens the same way; with its `footer_bytes` from `set.json`,
 footer in one request.
 
 The R package's test suite reads files and shards this way under Node
-(`tests/testthat/js/read-hyparquet.mjs`) and checks the rows, and that only
-the footer and the requested tile's bytes are fetched.
+(`tests/testthat/js/read-hyparquet.mjs`, and `read-hyparquet-tile.mjs` for
+row groups of several tiles) and checks the rows, and that only the footer
+and the requested tile's bytes are fetched.

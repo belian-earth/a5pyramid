@@ -1,5 +1,51 @@
 # a5pyramid (development version)
 
+* The rest of format version 4, for one store that engines and browsers
+  read alike (belian-production `docs/store-v4.md`):
+  * **List vectors:** `storage = c(embedding = "list")` stores a vector as
+    a Parquet list of its elements, dictionary encoded, which DuckDB reads
+    as `TINYINT[]`; Arrow list columns (DuckDB's output) are accepted as
+    vectors, each row checked for `dim` elements. `columns$storage` in the
+    info functions.
+  * **A weights column:** `weights_type` keeps each row's summed `weights`
+    at every level, named as the weights and not a value column, so a
+    reader can merge rows of one cell (`weights` in the info functions).
+  * **`a5_write_pyramid_level()`** writes one level of precomputed rows as
+    a file, optionally a shard with an `owner` column (each row cell's
+    supercell at the shard resolution) for a partition's partial rows,
+    without `lod` (one level) and without `ncell` (leaves). Rows are
+    sorted and checked, not built. In the crate: `Pyramid::from_rows()`,
+    `TileOptions::owner`, `lod_column`, `ncell_column`.
+  * **Shard tables:** `a5_write_pyramid_set(index = "parquet")` writes
+    `set.parquet`, one row per shard with the set's fields in the footer,
+    boxes unwrapped; `a5_write_pyramid_set_table()` writes one for shards
+    written apart, listing empty shards and carrying the writer's own
+    columns. `a5_pyramid_set_info()` reads both forms. In the crate:
+    `write_set_table()`, `read_set_table()`, `SetMeta::assemble()`,
+    `SetIndexFormat`; `ShardEntry::path` and `bbox` are optional.
+  * FORMAT.md: "Partial rows" (draw every row; merge by weights) and
+    "Shard tables".
+
+* Row groups of several tiles (format version 4): `row_group_size` in
+  `a5_write_pyramid()` and in a set's `tiers` splits each level down the
+  hierarchy into row groups of at most that many rows, and each row group
+  into tiles of `tile_size` rows, each one data page of every column chunk.
+  The file carries the Parquet page index (an offset index for every
+  column, a column index for `cell`), and the writer checks every page
+  against the tiles before the file is renamed into place. Engines that
+  read whole row groups make fewer requests: the embeddings store's
+  prototype replay over S3 ran 27 to 41% slower with 16,384-row groups than
+  with 122,880, while a browser reading 16,384-row pages of 131,072-row
+  groups fetched the same bytes as with 16,384-row groups. Without
+  `row_group_size` files are unchanged. `a5_pyramid_info()` gains
+  `row_group_size`, `row_groups` and `tiles$row_group`, and `tiles$bytes`
+  counts a tile's pages; data pages are pinned to version 1. In the crate:
+  `TileOptions::row_group_size`, `Tier::row_group_size`,
+  `PyramidMeta::row_group_size`, `PyramidMeta::locate_tiles()`,
+  `TiledPyramid::row_groups()`, `PyramidFile::tiles()`, `tile_bytes()` and
+  `parquet_metadata()`; `PyramidFile::read()` takes tiles, and
+  `WriteSummary` gains `tiles`.
+
 * Codecs: `codecs = c(embedding = "aef")` gives a `mean` column of codes
   the mean of the values they stand for. Each leaf's code is decoded, the
   (weighted) mean taken and the result encoded, so a coarse cell holds the

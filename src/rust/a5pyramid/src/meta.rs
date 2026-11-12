@@ -16,9 +16,10 @@ pub const A5_INDEX_KEY: &str = "a5_index";
 pub const A5_INDEX: &str = "1.0";
 /// The newest version of the layout this crate writes and reads. A writer
 /// records the oldest version whose rules a file follows: a single pyramid
-/// file is version 1, a shard of a pyramid set version 2, and either with a
-/// vector column version 3.
-pub const FORMAT_VERSION: u32 = 3;
+/// file is version 1, a shard of a pyramid set version 2, either with a
+/// vector column version 3, and either with row groups of several tiles
+/// version 4.
+pub const FORMAT_VERSION: u32 = 4;
 /// The version of a single pyramid file, whose finest level is the leaves.
 pub(crate) const SINGLE_FILE_VERSION: u32 = 1;
 /// The version of a shard of a set and of a set's index: fixed, so a later
@@ -26,10 +27,16 @@ pub(crate) const SINGLE_FILE_VERSION: u32 = 1;
 pub(crate) const SHARD_FILE_VERSION: u32 = 2;
 /// The version of a file or set with a vector column, fixed as the others.
 pub(crate) const VECTOR_FILE_VERSION: u32 = 3;
+/// The version of a file using any of version 4's features (row groups of
+/// several tiles, list vectors, a weights column, an `owner` column, or no
+/// `lod` or `ncell` column), and of a set with such a shard or a Parquet
+/// index, fixed as the others.
+pub(crate) const VERSION_4: u32 = 4;
 
 /// The index: what the levels are, which tiles hold each, and what area
-/// each tile covers. A tile is one row group of a Parquet file and one
-/// record batch in Arrow, numbered in order from 0.
+/// each tile covers. A tile is one record batch in Arrow and, in a Parquet
+/// file, one row group or (format version 4) one data page of a row group
+/// of several tiles; tiles are numbered in order from 0.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PyramidMeta {
     pub format_version: u32,
@@ -42,6 +49,21 @@ pub struct PyramidMeta {
     pub data_resolution: i32,
     /// The most rows a tile holds.
     pub tile_size: usize,
+    /// In a file whose row groups hold several tiles (format version 4),
+    /// the most rows a row group holds. Row group `g` of `n_g` rows then
+    /// holds `ceil(n_g / tile_size)` consecutive tiles, each `tile_size`
+    /// rows but the last, and each one data page of every column chunk.
+    /// Absent where every row group is one tile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_group_size: Option<usize>,
+    /// Version 4: the column of each row's summed leaf weights, which is
+    /// not a value column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weights: Option<WeightsMeta>,
+    /// Version 4, shards only: the file has an `owner` column, and its rows
+    /// may be partial (see FORMAT.md, "Partial rows").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner: bool,
     /// `[west, south, east, north]` (`west > east` across the antimeridian):
     /// in a single file the box of the leaves, in a shard the box of every
     /// tile, coarse cells included.
@@ -82,6 +104,7 @@ pub(crate) fn column_meta(columns: &[crate::ColumnSpec], vectors: &[crate::Vecto
         codec: c.codec.map(|k| k.as_str().to_string()),
         sd: c.sd,
         dim: None,
+        storage: None,
     });
     let vecs = vectors.iter().map(|v| ColumnMeta {
         name: v.name.clone(),
@@ -90,17 +113,37 @@ pub(crate) fn column_meta(columns: &[crate::ColumnSpec], vectors: &[crate::Vecto
         codec: v.codec.map(|k| k.as_str().to_string()),
         sd: v.sd,
         dim: Some(v.dim),
+        storage: (v.storage == crate::VectorStorage::List).then(|| "list".to_string()),
     });
     scalars.chain(vecs).collect()
 }
 
-/// The format version a file or set with these vector columns records over
-/// `base`, its version without them.
-pub(crate) fn version_with(vectors: &[crate::VectorSpec], base: u32) -> u32 {
-    if vectors.is_empty() {
-        base
-    } else {
+/// The weights column as the index records it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct WeightsMeta {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+}
+
+impl From<&crate::WeightsSpec> for WeightsMeta {
+    fn from(w: &crate::WeightsSpec) -> Self {
+        Self {
+            name: w.name.clone(),
+            ty: w.ty.as_str().to_string(),
+        }
+    }
+}
+
+/// The format version a file or set records over `base`, its version
+/// without vector columns and version 4's features (`v4`).
+pub(crate) fn version_with(vectors: &[crate::VectorSpec], v4: bool, base: u32) -> u32 {
+    if v4 || vectors.iter().any(|v| v.storage == crate::VectorStorage::List) {
+        VERSION_4
+    } else if !vectors.is_empty() {
         VECTOR_FILE_VERSION
+    } else {
+        base
     }
 }
 
@@ -127,6 +170,21 @@ pub struct ColumnMeta {
     /// `type` (`int8` or `uint8`). Absent for scalar columns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dim: Option<usize>,
+    /// For a vector column stored as a list of `dim` elements, `"list"`
+    /// (version 4); absent for fixed-length binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
+}
+
+/// Where a tile is in a Parquet file: its row group, its first row there,
+/// and its rows. In a row group of several tiles (format version 4) the
+/// tile is data page `page` of every column chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TileLocation {
+    pub row_group: usize,
+    pub page: usize,
+    pub offset: u64,
+    pub rows: u64,
 }
 
 /// A level: its LOD (A5 resolution), row count, and the half-open range
@@ -205,8 +263,52 @@ impl PyramidMeta {
             .collect())
     }
 
-    /// Check that the index agrees with a pyramid of `n_tiles` tiles (row
-    /// groups of a file, record batches in Arrow).
+    /// The tiles of a file whose row groups hold `row_group_rows` rows, in
+    /// order, after checking that the index agrees with them: each row group
+    /// is one tile, or (with `row_group_size`) `ceil(rows / tile_size)` of
+    /// them, and no row group holds tiles of two levels.
+    pub fn locate_tiles(&self, row_group_rows: &[u64]) -> Result<Vec<TileLocation>> {
+        let bad = |msg: String| Err(Error::Format(format!("inconsistent a5pyramid index: {msg}")));
+        let mut tiles = Vec::new();
+        let mut starts = Vec::with_capacity(row_group_rows.len() + 1);
+        for (g, &rows) in row_group_rows.iter().enumerate() {
+            starts.push(tiles.len());
+            let n = match self.row_group_size {
+                None => 1,
+                Some(size) => {
+                    if rows == 0 || rows > size as u64 {
+                        return bad(format!(
+                            "row group {g} holds {rows} rows, outside 1 to the row group size {size}"
+                        ));
+                    }
+                    rows.div_ceil(self.tile_size as u64) as usize
+                }
+            };
+            let step = if n == 1 { rows } else { self.tile_size as u64 };
+            for page in 0..n {
+                let offset = page as u64 * step;
+                tiles.push(TileLocation {
+                    row_group: g,
+                    page,
+                    offset,
+                    rows: step.min(rows - offset),
+                });
+            }
+        }
+        starts.push(tiles.len());
+        self.validate(tiles.len())?;
+        for l in &self.levels {
+            if l.tiles[0] < l.tiles[1]
+                && (starts.binary_search(&l.tiles[0]).is_err() || starts.binary_search(&l.tiles[1]).is_err())
+            {
+                return bad(format!("a row group holds tiles of level {} and another", l.lod));
+            }
+        }
+        Ok(tiles)
+    }
+
+    /// Check that the index agrees with a pyramid of `n_tiles` tiles (record
+    /// batches in Arrow; see [`Self::locate_tiles`] for a file).
     pub fn validate(&self, n_tiles: usize) -> Result<()> {
         let bad = |msg: String| Err(Error::Format(format!("inconsistent a5pyramid index: {msg}")));
         if self.tile_bbox.len() != 4 * n_tiles {
@@ -229,6 +331,55 @@ impl PyramidMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn index(tile_size: usize, row_group_size: Option<usize>, levels: &[(i32, [usize; 2])]) -> PyramidMeta {
+        let n = levels.last().map_or(0, |l| l.1[1]);
+        PyramidMeta {
+            format_version: 4,
+            generator: "g".into(),
+            a5_crate: "1.0.0".into(),
+            data_resolution: 9,
+            tile_size,
+            row_group_size,
+            weights: None,
+            owner: false,
+            bbox: [0.0, 0.0, 1.0, 1.0],
+            columns: vec![],
+            levels: levels
+                .iter()
+                .map(|&(lod, tiles)| LevelMeta { lod, rows: 0, tiles })
+                .collect(),
+            tile_bbox: vec![0.0; 4 * n],
+            shard: None,
+        }
+    }
+
+    #[test]
+    fn row_groups_hold_tiles_of_tile_size_rows() {
+        let m = index(10, Some(30), &[(5, [0, 1]), (9, [1, 5])]);
+        let t = m.locate_tiles(&[4, 30, 7]).unwrap();
+        let got: Vec<(usize, usize, u64, u64)> = t.iter().map(|t| (t.row_group, t.page, t.offset, t.rows)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (0, 0, 0, 4),
+                (1, 0, 0, 10),
+                (1, 1, 10, 10),
+                (1, 2, 20, 10),
+                (2, 0, 0, 7)
+            ]
+        );
+        // too many rows, too few tiles, a row group across two levels
+        assert!(m.locate_tiles(&[4, 31, 7]).is_err());
+        assert!(m.locate_tiles(&[4, 30]).is_err());
+        assert!(index(10, Some(30), &[(5, [0, 2]), (9, [2, 5])])
+            .locate_tiles(&[4, 30, 7])
+            .is_err());
+        // without a row group size every row group is one tile
+        let one = index(10, None, &[(5, [0, 1]), (9, [1, 3])]);
+        assert_eq!(one.locate_tiles(&[4, 10, 7]).unwrap().len(), 3);
+        assert!(one.locate_tiles(&[4, 10]).is_err());
+    }
 
     #[test]
     fn indexes_written_before_the_rename_still_read() {

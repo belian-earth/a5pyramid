@@ -19,19 +19,28 @@ the file) and \code{a5_index} (the A5 index version of its ids).
 \item \code{data_resolution}: the leaves' resolution. \code{lods}: every level's
 LOD, ascending, the leaves last.
 \item \code{tile_size}: the most rows in a tile.
+\item \code{row_group_size}: in a file whose row groups hold several tiles
+(format version 4), the most rows in a row group; \code{NA} where each
+row group is one tile. \code{row_groups}: the number of row groups.
+\item \code{weights}: the weights column (a list of its \code{name} and \code{type};
+format version 4), or \code{NULL}.
+\item \code{owner}: whether the file has an \code{owner} column, a shard whose rows
+may be partial (format version 4; see \code{\link[=a5_write_pyramid_level]{a5_write_pyramid_level()}}).
 \item \code{bbox}: \code{c(xmin, ymin, xmax, ymax)} of the leaves.
 \item \code{columns}: a tibble of the value columns' \code{name}, \code{type},
 \code{reducer}, \code{codec} (see \code{\link[=a5_pyramid]{a5_pyramid()}}; \code{NA} for a column that
 stores its values) and \code{sd}, the standard deviation that scaled a
 \code{"rep_child"} column (1 where the leaves' standard deviation is 0 or
-undefined; \code{NA} for other reducers and older files), and \code{dim}, the
-elements per cell of a vector column (\code{NA} for scalar columns).
+undefined; \code{NA} for other reducers and older files), \code{dim}, the
+elements per cell of a vector column (\code{NA} for scalar columns), and
+\code{storage}, a vector column's storage (\code{"fixed_binary"} or \code{"list"}).
 \item \code{levels}: a tibble of each level's \code{lod}, \code{rows} and number of
 \code{tiles}.
-\item \code{tiles}: a tibble with one row per tile, which is one row group of
-the file: \code{tile} (its 0-based index, the row group's index as Parquet
-readers count), \code{lod}, \code{rows}, \code{bytes} (compressed size, what a
-reader fetches) and \code{xmin}, \code{ymin}, \code{xmax}, \code{ymax}.
+\item \code{tiles}: a tibble with one row per tile: \code{tile} (its 0-based index),
+\code{row_group} (the 0-based index of its row group, as Parquet readers
+count), \code{lod}, \code{rows}, \code{bytes} (compressed size, what a reader
+fetches: the row group, or the tile's data pages in a row group of
+several tiles) and \code{xmin}, \code{ymin}, \code{xmax}, \code{ymax}.
 \item \code{metadata}: the file's other key-value metadata, a named character
 vector.
 \item \code{shard}: for a shard of a pyramid set (format version 2, written by
