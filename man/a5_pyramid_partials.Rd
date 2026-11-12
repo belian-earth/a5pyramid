@@ -88,12 +88,12 @@ emb <- matrix(sample(-128:127, length(cells) * 4, replace = TRUE), ncol = 4)
 x <- tibble::tibble(cell = cells, embedding = emb, n = 1 + seq_along(cells) \%\% 5)
 
 # two parts, built one at a time
-west <- a5_cell_to_supercell(cells, 10) < a5_cell_to_supercell(centre, 10)
+west <- a5_cell_to_supercell(cells, 11) < a5_cell_to_supercell(cells[1], 11)
 parts <- lapply(split(seq_along(cells), west), function(i) {
   a5_pyramid_partials(x[i, ], embedding, lods = 10:12, key_resolution = 8,
                       weights = "n", codecs = c(embedding = "aef"))
 })
-merged <- a5_pyramid_merge_partials(do.call(arrow::concat_tables, parts))
+merged <- a5_pyramid_merge_partials(do.call(arrow::concat_tables, unname(parts)))
 merged
 \dontshow{\}) # examplesIf}
 }
