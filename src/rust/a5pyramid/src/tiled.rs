@@ -453,7 +453,7 @@ fn vector_array(spec: &VectorSpec, bytes: &[u8]) -> Result<ArrayRef> {
 
 /// Values (NaN where missing) as an Arrow array of `ty`, nulls where
 /// missing. Values are already quantised to `ty` by the build.
-fn value_array(ty: ColumnType, v: &[f64]) -> ArrayRef {
+pub(crate) fn value_array(ty: ColumnType, v: &[f64]) -> ArrayRef {
     let nulls = v
         .iter()
         .any(|x| x.is_nan())

@@ -51,6 +51,21 @@ a5pyramid_write_rs <- function(leaves, lods, dest, tile_size, row_group_size, co
 #' @keywords internal
 a5pyramid_arrow_rs <- function(leaves, lods, tile_size, meta_keys, meta_values, generator, threads) .Call(wrap__a5pyramid_arrow_rs, leaves, lods, tile_size, meta_keys, meta_values, generator, threads)
 
+#' The partial rows of the leaves in a handle at `lods`, keyed at
+#' `key_resolutions`, as an Arrow C stream of one batch.
+#' @noRd
+#' @keywords internal
+a5pyramid_partials_rs <- function(leaves, lods, key_resolutions, threads) .Call(wrap__a5pyramid_partials_rs, leaves, lods, key_resolutions, threads)
+
+#' Merge the partial rows read from the Arrow C stream in `holder` (from
+#' `a5pyramid_stream_slot_rs()`, filled by arrow), keeping only the rows
+#' of `keys` (an a5_cell vector) unless it is NULL. Batches are read on R's
+#' main thread, one at a time, so only the rows kept are held; the sums and
+#' codes are computed on `threads` threads. An Arrow C stream of one batch.
+#' @noRd
+#' @keywords internal
+a5pyramid_merge_partials_rs <- function(holder, keys, threads) .Call(wrap__a5pyramid_merge_partials_rs, holder, keys, threads)
+
 #' Build a pyramid and write it as a set of shard files in `dest`; returns
 #' the set's index.
 #' @noRd

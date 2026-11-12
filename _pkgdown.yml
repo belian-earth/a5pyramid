@@ -39,6 +39,11 @@ reference:
   - a5_pyramid_set_tiers
   - a5_pyramid_set_info
   - a5_write_pyramid_set_table
+- title: Partial rows
+  desc: Exact sums at coarse levels for parts built one at a time, merged into levels that span them.
+  contents:
+  - a5_pyramid_partials
+  - a5_pyramid_merge_partials
 - title: Configuration
   contents:
   - a5pyramid_threads
