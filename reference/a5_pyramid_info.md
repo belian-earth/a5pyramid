@@ -97,7 +97,7 @@ a5_write_pyramid(data.frame(cell = cells, value = runif(length(cells))), path)
 
 info <- a5_pyramid_info(path)
 info
-#> ── a5pyramid file file2a23522eeb71.parquet ─────────────────────────────────────
+#> ── a5pyramid file file29341e4210c0.parquet ─────────────────────────────────────
 #> Size: 17.1 KB (footer 4.6 KB)
 #> A5 index: 1.0
 #> Leaves: resolution 15, 1,024 cells
