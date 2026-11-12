@@ -5,9 +5,9 @@
 //! The schema metadata holds the index ([`PyramidMeta`], under
 //! [`META_KEY`]), so the batches are the whole pyramid: what a renderer
 //! needs, in memory, without a file. [`crate::write_parquet`] writes each
-//! batch as one row group, so batch `i` of a [`TiledPyramid`] and row group
-//! `i` of its file hold the same rows, tile `i` of the one index that
-//! describes both.
+//! batch as one row group, or with [`TileOptions::row_group_size`] as one
+//! data page of a row group of several, so batch `i` of a [`TiledPyramid`]
+//! and tile `i` of its file hold the same rows, described by one index.
 //!
 //! [`TiledPyramid::into_reader`] streams the batches through an
 //! [`arrow_array::RecordBatchReader`], building each when it is read, which
@@ -45,6 +45,14 @@ const RESERVED_KEYS: [&str; 3] = [META_KEY, A5_INDEX_KEY, "ARROW:schema"];
 pub struct TileOptions {
     /// The most rows in a tile.
     pub tile_size: usize,
+    /// The most rows in a Parquet row group, at least `tile_size`, or `None`
+    /// for one tile a row group. With a size, each level is split into row
+    /// groups as it would be into tiles of this size, and each row group
+    /// into tiles of `tile_size` rows (the last shorter), each one data
+    /// page of every column chunk: engines that scan whole row groups make
+    /// fewer requests, and a renderer still reads one tile at a time
+    /// through the Parquet page index (format version 4).
+    pub row_group_size: Option<usize>,
     /// Recorded as the index's `generator`.
     pub generator: String,
     /// Extra metadata, such as a renderer's settings, stored beside the index:
@@ -62,6 +70,7 @@ impl Default for TileOptions {
     fn default() -> Self {
         Self {
             tile_size: 4096,
+            row_group_size: None,
             generator: format!("a5pyramid {}", env!("CARGO_PKG_VERSION")),
             metadata: Vec::new(),
             shard: None,
@@ -74,6 +83,8 @@ impl Default for TileOptions {
 pub struct TiledPyramid {
     pyramid: Pyramid,
     tiles: Vec<Tile>,
+    /// The tiles of each row group of the file, in order.
+    row_groups: Vec<Range<usize>>,
     meta: PyramidMeta,
     metadata: Vec<(String, String)>,
     schema: SchemaRef,
@@ -93,6 +104,13 @@ impl TiledPyramid {
         if opts.tile_size == 0 {
             return Err(invalid("tile_size must be at least 1"));
         }
+        let group_size = opts.row_group_size.unwrap_or(opts.tile_size);
+        if group_size < opts.tile_size {
+            return Err(invalid(format!(
+                "row_group_size ({group_size}) must be at least tile_size ({})",
+                opts.tile_size
+            )));
+        }
         let mut seen = HashSet::new();
         for (k, _) in &opts.metadata {
             if RESERVED_KEYS.contains(&k.as_str()) {
@@ -108,13 +126,25 @@ impl TiledPyramid {
         }
 
         let mut tiles = Vec::new();
+        let mut row_groups = Vec::new();
         let mut levels = Vec::with_capacity(pyramid.levels.len());
         let mut tile_bbox = Vec::new();
         let mut leaf_boxes = Vec::new();
         let mut all_boxes = Vec::new();
         for (k, level) in pyramid.levels.iter().enumerate() {
             cancel.check()?;
-            let ranges = plan_tiles(&level.cells, opts.tile_size)?;
+            // row groups are planned as tiles were, then cut into tiles of
+            // tile_size rows: a page boundary falls only on a row count
+            let mut ranges = Vec::new();
+            for g in plan_tiles(&level.cells, group_size)? {
+                let first = tiles.len() + ranges.len();
+                ranges.extend(
+                    (g.start..g.end)
+                        .step_by(opts.tile_size)
+                        .map(|s| s..(s + opts.tile_size).min(g.end)),
+                );
+                row_groups.push(first..tiles.len() + ranges.len());
+            }
             let boxes = ranges
                 .par_iter()
                 .map(|r| cells_bbox(&level.cells[r.clone()]))
@@ -137,12 +167,14 @@ impl TiledPyramid {
             None => (SINGLE_FILE_VERSION, &leaf_boxes),
             Some(_) => (SHARD_FILE_VERSION, &all_boxes),
         };
+        let several = row_groups.iter().any(|g| g.len() > 1);
         let meta = PyramidMeta {
-            format_version: version_with(&pyramid.vectors, format_version),
+            format_version: version_with(&pyramid.vectors, several, format_version),
             generator: opts.generator.clone(),
             a5_crate: crate::A5_CRATE_VERSION.to_string(),
             data_resolution: pyramid.data_resolution,
             tile_size: opts.tile_size,
+            row_group_size: several.then_some(group_size),
             bbox: Bbox::covering(boxed).unwrap_or(Bbox::WORLD).to_array(),
             columns: column_meta(&pyramid.columns, &pyramid.vectors),
             levels,
@@ -160,6 +192,7 @@ impl TiledPyramid {
         Ok(Self {
             pyramid,
             tiles,
+            row_groups,
             meta,
             metadata,
             schema,
@@ -199,6 +232,12 @@ impl TiledPyramid {
     /// Rows in each tile.
     pub fn tile_rows(&self) -> Vec<usize> {
         self.tiles.iter().map(|t| t.rows.len()).collect()
+    }
+
+    /// The tiles of each row group of the file, in order: one each unless
+    /// [`TileOptions::row_group_size`] was given.
+    pub fn row_groups(&self) -> &[Range<usize>] {
+        &self.row_groups
     }
 
     /// Tile `i` as a record batch. Each call builds the batch from the
@@ -556,6 +595,146 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    fn grouped(tile_size: usize, row_group_size: usize) -> TileOptions {
+        TileOptions {
+            tile_size,
+            row_group_size: Some(row_group_size),
+            ..opts()
+        }
+    }
+
+    #[test]
+    fn row_groups_of_several_tiles_are_cut_into_tiles_by_rows() {
+        let p = sample();
+        let tiled = TiledPyramid::new(p.clone(), &grouped(100, 450), &Cancel::new()).unwrap();
+        let m = tiled.meta();
+        assert_eq!((m.format_version, m.row_group_size, m.tile_size), (4, Some(450), 100));
+        let rows = tiled.tile_rows();
+        let groups = tiled.row_groups();
+        assert!(groups.iter().any(|g| g.len() > 1));
+        // row groups follow each other, cover every tile, hold one level each
+        assert_eq!(groups[0].start, 0);
+        assert!(groups.windows(2).all(|w| w[0].end == w[1].start));
+        assert_eq!(groups.last().unwrap().end, tiled.n_tiles());
+        for g in groups {
+            let n: usize = rows[g.clone()].iter().sum();
+            assert!(n <= 450 && n > 0);
+            assert!(rows[g.start..g.end - 1].iter().all(|&r| r == 100));
+            assert!(rows[g.end - 1] <= 100);
+            assert_eq!(m.level_of(g.start), m.level_of(g.end - 1));
+        }
+        // the tiles still hold every level in cell order
+        for (level, lm) in p.levels.iter().zip(&m.levels) {
+            let cells: Vec<u64> = (lm.tiles[0]..lm.tiles[1])
+                .flat_map(|i| {
+                    tiled
+                        .tile(i)
+                        .unwrap()
+                        .column(0)
+                        .as_primitive::<UInt64Type>()
+                        .values()
+                        .to_vec()
+                })
+                .collect();
+            assert_eq!(cells, level.cells);
+        }
+        // a row group size equal to the tile size is the default layout
+        let same = TiledPyramid::new(p.clone(), &grouped(100, 100), &Cancel::new()).unwrap();
+        let plain = TiledPyramid::new(
+            p,
+            &TileOptions {
+                tile_size: 100,
+                ..opts()
+            },
+            &Cancel::new(),
+        )
+        .unwrap();
+        assert_eq!(same.meta(), plain.meta());
+        assert_eq!(same.meta().format_version, 1);
+        assert!(same.row_groups().iter().all(|g| g.len() == 1));
+    }
+
+    #[test]
+    fn tiles_of_large_row_groups_are_pages_of_the_file() {
+        let dir = tempdir("pages");
+        let path = dir.join("p.parquet");
+        let tiled = TiledPyramid::new(sample(), &grouped(100, 450), &Cancel::new()).unwrap();
+        let summary = write_parquet(&tiled, &path, &ParquetOptions::default(), &Cancel::new()).unwrap();
+        assert_eq!(
+            (summary.tiles, summary.row_groups),
+            (tiled.n_tiles(), tiled.row_groups().len())
+        );
+        let f = PyramidFile::open(&path).unwrap();
+        assert_eq!(f.meta, *tiled.meta());
+        assert_eq!(f.n_row_groups(), tiled.row_groups().len());
+        assert_eq!(f.n_tiles(), tiled.n_tiles());
+        let rows: Vec<u64> = f.tiles().iter().map(|t| t.rows).collect();
+        assert_eq!(rows, tiled.tile_rows().iter().map(|&r| r as u64).collect::<Vec<_>>());
+        for (g, group) in tiled.row_groups().iter().enumerate() {
+            for (k, i) in group.clone().enumerate() {
+                let t = f.tiles()[i];
+                assert_eq!((t.row_group, t.page, t.offset), (g, k, 100 * k as u64));
+            }
+        }
+        // each tile reads back alone, and in any order
+        for i in 0..tiled.n_tiles() {
+            let b = f.read(&[i]).unwrap();
+            assert_eq!(b.len(), 1);
+            assert_eq!(b[0].columns(), tiled.tile(i).unwrap().columns(), "tile {i}");
+        }
+        let order = [5, 2, 3, 4, 0, 9, 9];
+        let got = f.read(&order).unwrap();
+        assert_eq!(got.len(), order.len());
+        for (b, &i) in got.iter().zip(&order) {
+            assert_eq!(b.columns(), tiled.tile(i).unwrap().columns(), "tile {i}");
+        }
+        assert!(f.read(&[tiled.n_tiles()]).is_err());
+        // a tile's bytes are its pages', a fraction of its row group's
+        let bytes = f.tile_bytes();
+        let rg = f.row_group_bytes();
+        assert!(bytes.iter().all(|&b| b > 0));
+        let i = tiled.row_groups().iter().find(|g| g.len() > 2).unwrap().start;
+        assert!(bytes[i] < rg[f.tiles()[i].row_group] / 2);
+        // the column index gives each page's cell range
+        let md = f.parquet_metadata();
+        assert!(md.page_index().unwrap().column_index(0, 0).is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pages_of_wide_vectors_are_cut_by_rows_alone() {
+        // 16,384 rows of a 64-byte vector make a 1 MB page, Parquet's default
+        // page size limit
+        let cells = crate::testutil::grid(15, (10.0, 10.9), (50.0, 50.6), 220);
+        let n = cells.len();
+        assert!(n > 2 * 16384, "{n} leaves");
+        let bytes: Vec<u8> = (0..n * 64).map(|i| (i * 131 % 251) as u8).collect();
+        let leaves = Leaves {
+            cells,
+            columns: vec![Column::new("v", ColumnType::Float32, Reducer::Mean, vec![1.0; n])],
+            vectors: vec![crate::VectorColumn::new("emb", ColumnType::Int8, 64, bytes)],
+            ..Default::default()
+        };
+        let p = build(leaves, &[12], &Cancel::new()).unwrap();
+        let tiled = TiledPyramid::new(p, &grouped(16384, 131072), &Cancel::new()).unwrap();
+        assert!(tiled.row_groups().iter().any(|g| g.len() > 2));
+        let dir = tempdir("wide");
+        let path = dir.join("p.parquet");
+        // the write checks every page against the tiles
+        let zstd = ParquetOptions {
+            compression: crate::Compression::Zstd,
+        };
+        write_parquet(&tiled, &path, &zstd, &Cancel::new()).unwrap();
+        let f = PyramidFile::open(&path).unwrap();
+        assert_eq!(f.meta.format_version, 4);
+        let last = tiled.n_tiles() - 1;
+        assert_eq!(
+            f.read(&[last]).unwrap()[0].columns(),
+            tiled.tile(last).unwrap().columns()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn files_without_vectors_keep_version_1() {
         let tiled = TiledPyramid::new(sample(), &opts(), &Cancel::new()).unwrap();
@@ -582,6 +761,12 @@ mod tests {
             ..Default::default()
         };
         assert!(TiledPyramid::new(sample(), &dup, &cancel).is_err());
+        let small = TileOptions {
+            tile_size: 100,
+            row_group_size: Some(99),
+            ..Default::default()
+        };
+        assert!(TiledPyramid::new(sample(), &small, &cancel).is_err());
         let stop = Cancel::new();
         stop.cancel();
         assert!(matches!(

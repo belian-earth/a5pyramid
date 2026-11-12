@@ -125,7 +125,8 @@ test_that("bad tiers and occupied directories are refused", {
     data.frame(lod_min = 2L, lod_max = 15L, shard_resolution = 3L),
     data.frame(lod_min = c(2L, 8L), lod_max = c(8L, 15L), shard_resolution = c(0L, 6L)),
     data.frame(lod_min = 2L, lod_max = 15L, shard_resolution = -1L),
-    data.frame(lod_min = 2L, lod_max = 15L, shard_resolution = 0L, tile_size = 0L)
+    data.frame(lod_min = 2L, lod_max = 15L, shard_resolution = 0L, tile_size = 0L),
+    data.frame(lod_min = 2L, lod_max = 15L, shard_resolution = 0L, tile_size = 10L, row_group_size = 9L)
   )
   for (tiers in bad) {
     dest <- tmp_set()
@@ -159,4 +160,24 @@ test_that("a single file keeps format version 1 and no shard", {
   expect_identical(info$format_version, 1L)
   expect_null(info$shard)
   expect_match(cli::cli_fmt(print(info))[1], "a5pyramid file")
+})
+
+test_that("tiers with row groups of several tiles make a version 4 set", {
+  x <- make_leaves()
+  dest <- tmp_set()
+  tiers <- data.frame(lod_min = c(2L, 13L), lod_max = c(12L, 15L), shard_resolution = c(0L, 10L),
+                      tile_size = c(100L, 100L), row_group_size = c(NA, 400L))
+  a5_write_pyramid_set(x, dest, value, types = c(value = "float32"), tiers = tiers)
+  set <- a5_pyramid_set_info(dest)
+  expect_identical(set$format_version, 4L)
+  expect_identical(set$tiers$row_group_size, c(NA, 400L))
+  rows <- 0L
+  for (i in seq_len(nrow(set$shards))) {
+    info <- a5_pyramid_info(file.path(dest, set$shards$path[i]))
+    expect_identical(set$shards$tiles[i], nrow(info$tiles))
+    if (set$shards$tier[i] == 0L) expect_true(is.na(info$row_group_size))
+    rows <- rows + nrow(a5_read_pyramid(file.path(dest, set$shards$path[i])))
+  }
+  expect_identical(rows, nrow(a5_pyramid(x, value)))
+  expect_true(all(is.na(a5_pyramid_set_tiers(18)$row_group_size)))
 })

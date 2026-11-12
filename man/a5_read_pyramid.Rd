@@ -22,7 +22,7 @@ ascending LOD, then cell id.
 \description{
 Reads the rows of the tiles at \code{lod} whose bounding boxes meet \code{bbox},
 as a renderer does for a view: the footer first, then only those tiles'
-row groups. Selection is by tile, so rows of a selected tile that lie
+row groups, or their data pages where row groups hold several tiles. Selection is by tile, so rows of a selected tile that lie
 outside \code{bbox} are returned too; filter the cells afterwards for an
 exact cut.
 }

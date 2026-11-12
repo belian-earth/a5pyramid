@@ -1,17 +1,22 @@
-//! Reading pyramid files: the index from the footer, then only the row
-//! groups asked for, as a renderer reads them.
+//! Reading pyramid files: the index from the footer, then only the tiles
+//! asked for, as a renderer reads them: whole row groups, or in a file of
+//! row groups of several tiles (format version 4) the tiles' pages, found
+//! through the page index.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use arrow_array::RecordBatch;
 use arrow_schema::DataType;
-use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder};
+use parquet::arrow::arrow_reader::{
+    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelection, RowSelector,
+};
+use parquet::file::metadata::PageIndexPolicy;
 
 use crate::bbox::Bbox;
 use crate::column::ColumnType;
 use crate::error::{invalid, Error, Result};
-use crate::meta::{PyramidMeta, A5_INDEX_KEY, META_KEY};
+use crate::meta::{PyramidMeta, TileLocation, A5_INDEX_KEY, META_KEY};
 use crate::{CELL_COLUMN, LOD_COLUMN, NCELL_COLUMN};
 
 /// An open pyramid file: its index and Parquet metadata.
@@ -19,6 +24,7 @@ use crate::{CELL_COLUMN, LOD_COLUMN, NCELL_COLUMN};
 pub struct PyramidFile {
     path: PathBuf,
     arrow: ArrowReaderMetadata,
+    tiles: Vec<TileLocation>,
     /// The index.
     pub meta: PyramidMeta,
     /// The `a5_index` entry: the A5 index version of the ids, if recorded.
@@ -36,7 +42,10 @@ impl PyramidFile {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path)?;
         let bytes = file.metadata()?.len();
-        let arrow = ArrowReaderMetadata::load(&file, ArrowReaderOptions::new())?;
+        // the page index where there is one: it locates the tiles of row
+        // groups of several tiles
+        let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional);
+        let arrow = ArrowReaderMetadata::load(&file, options)?;
         let kv = arrow
             .metadata()
             .file_metadata()
@@ -62,11 +71,21 @@ impl PyramidFile {
             ))
         })?;
         let meta = PyramidMeta::from_json(&index)?;
-        meta.validate(arrow.metadata().num_row_groups())?;
+        let rows: Vec<u64> = arrow
+            .metadata()
+            .row_groups()
+            .iter()
+            .map(|rg| rg.num_rows() as u64)
+            .collect();
+        let tiles = meta.locate_tiles(&rows)?;
         check_schema(&arrow, &meta)?;
+        if meta.row_group_size.is_some() {
+            check_offset_index(&arrow, &tiles)?;
+        }
         Ok(Self {
             path,
             arrow,
+            tiles,
             meta,
             a5_index,
             metadata,
@@ -80,6 +99,43 @@ impl PyramidFile {
 
     pub fn n_row_groups(&self) -> usize {
         self.arrow.metadata().num_row_groups()
+    }
+
+    /// The file's Parquet metadata, with its page index where it has one.
+    pub fn parquet_metadata(&self) -> &parquet::file::metadata::ParquetMetaData {
+        self.arrow.metadata()
+    }
+
+    pub fn n_tiles(&self) -> usize {
+        self.tiles.len()
+    }
+
+    /// Where each tile is: its row group, page, first row there and rows.
+    pub fn tiles(&self) -> &[TileLocation] {
+        &self.tiles
+    }
+
+    /// Compressed bytes of each tile, what a reader fetches for it: its row
+    /// group, or in a row group of several tiles its page of every column
+    /// chunk (page headers included, dictionary pages not).
+    pub fn tile_bytes(&self) -> Vec<u64> {
+        let md = self.arrow.metadata();
+        match (self.meta.row_group_size, md.page_index()) {
+            (Some(_), Some(index)) => self
+                .tiles
+                .iter()
+                .map(|t| {
+                    (0..md.row_group(t.row_group).num_columns())
+                        .filter_map(|c| index.offset_index(t.row_group, c))
+                        .map(|o| o.page_locations()[t.page].compressed_page_size as u64)
+                        .sum()
+                })
+                .collect(),
+            _ => {
+                let rg = self.row_group_bytes();
+                self.tiles.iter().map(|t| rg[t.row_group]).collect()
+            }
+        }
     }
 
     /// Rows in each row group.
@@ -102,8 +158,10 @@ impl PyramidFile {
             .collect()
     }
 
-    /// Bytes of the footer (Parquet metadata, index included), which a
-    /// reader fetches before any row group.
+    /// Bytes from the end of the last column chunk to the end of the file:
+    /// the footer (Parquet metadata, index included) and, where there is
+    /// one, the page index before it. A reader fetches them before any
+    /// tile.
     pub fn footer_bytes(&self) -> u64 {
         let ends: Vec<u64> = self
             .arrow
@@ -120,31 +178,90 @@ impl PyramidFile {
         self.bytes - ends.into_iter().max().unwrap_or(4)
     }
 
-    /// The row groups at `lods` (all levels when `None`) whose boxes meet
-    /// `bbox` (everywhere when `None`), in file order; see
-    /// [`PyramidMeta::select`].
+    /// The tiles at `lods` (all levels when `None`) whose boxes meet `bbox`
+    /// (everywhere when `None`), in file order; see [`PyramidMeta::select`].
     pub fn select(&self, lods: Option<&[i32]>, bbox: Option<&Bbox>) -> Result<Vec<usize>> {
         self.meta.select(lods, bbox)
     }
 
-    /// Decode `row_groups` (in file order) as record batches.
-    pub fn read(&self, row_groups: &[usize]) -> Result<Vec<RecordBatch>> {
-        if let Some(&rg) = row_groups.iter().find(|&&rg| rg >= self.n_row_groups()) {
+    /// Decode `tiles`, one record batch each, in the order given.
+    pub fn read(&self, tiles: &[usize]) -> Result<Vec<RecordBatch>> {
+        if let Some(&i) = tiles.iter().find(|&&i| i >= self.n_tiles()) {
             return Err(invalid(format!(
-                "row group {rg} does not exist; the file has {}",
-                self.n_row_groups()
+                "tile {i} does not exist; the file has {}",
+                self.n_tiles()
             )));
         }
-        if row_groups.is_empty() {
-            return Ok(Vec::new());
-        }
         let file = File::open(&self.path)?;
-        let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(file, self.arrow.clone())
-            .with_row_groups(row_groups.to_vec())
-            .with_batch_size(64 * 1024)
-            .build()?;
-        Ok(reader.collect::<std::result::Result<Vec<_>, _>>()?)
+        let mut out = Vec::with_capacity(tiles.len());
+        // one reader for each run of ascending tiles in one row group
+        let mut s = 0;
+        while s < tiles.len() {
+            let g = self.tiles[tiles[s]].row_group;
+            let mut e = s + 1;
+            while e < tiles.len() && self.tiles[tiles[e]].row_group == g && tiles[e] > tiles[e - 1] {
+                e += 1;
+            }
+            let run: Vec<TileLocation> = tiles[s..e].iter().map(|&i| self.tiles[i]).collect();
+            let mut selectors = Vec::with_capacity(2 * run.len());
+            let mut at = 0;
+            for t in &run {
+                if t.offset > at {
+                    selectors.push(RowSelector::skip((t.offset - at) as usize));
+                }
+                selectors.push(RowSelector::select(t.rows as usize));
+                at = t.offset + t.rows;
+            }
+            // a batch of tile_size rows ends at each tile's end: every tile of
+            // a row group but its last holds tile_size rows
+            let size = run.iter().map(|t| t.rows).max().unwrap_or(1).max(1) as usize;
+            let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(file.try_clone()?, self.arrow.clone())
+                .with_row_groups(vec![g])
+                .with_row_selection(RowSelection::from(selectors))
+                .with_batch_size(size)
+                .build()?;
+            let batches = reader.collect::<std::result::Result<Vec<_>, _>>()?;
+            let got: Vec<u64> = batches.iter().map(|b| b.num_rows() as u64).collect();
+            let want: Vec<u64> = run.iter().map(|t| t.rows).collect();
+            if got != want {
+                return Err(Error::Format(format!(
+                    "row group {g} gave batches of {got:?} rows for tiles of {want:?}"
+                )));
+            }
+            out.extend(batches);
+            s = e;
+        }
+        Ok(out)
     }
+}
+
+/// Check that the offset index puts each tile of a row group of several
+/// tiles in one data page of every column chunk.
+fn check_offset_index(arrow: &ArrowReaderMetadata, tiles: &[TileLocation]) -> Result<()> {
+    let md = arrow.metadata();
+    for g in 0..md.num_row_groups() {
+        let want: Vec<u64> = tiles.iter().filter(|t| t.row_group == g).map(|t| t.offset).collect();
+        for c in 0..md.row_group(g).num_columns() {
+            let got = page_starts(md, g, c).ok_or_else(|| {
+                Error::Format(format!(
+                    "row group {g} holds several tiles, but column {c} has no offset index to find them"
+                ))
+            })?;
+            if got != want {
+                return Err(Error::Format(format!(
+                    "row group {g}, column {c}: data pages start at rows {got:?}, not at its tiles' {want:?}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The first row of each data page of column `c` in row group `g`, from the
+/// offset index; `None` without one.
+pub(crate) fn page_starts(md: &parquet::file::metadata::ParquetMetaData, g: usize, c: usize) -> Option<Vec<u64>> {
+    let o = md.page_index()?.offset_index(g, c)?;
+    Some(o.page_locations().iter().map(|p| p.first_row_index as u64).collect())
 }
 
 fn check_schema(arrow: &ArrowReaderMetadata, meta: &PyramidMeta) -> Result<()> {

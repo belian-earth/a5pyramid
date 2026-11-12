@@ -17,6 +17,9 @@
 #'   - `data_resolution`: the leaves' resolution. `lods`: every level's
 #'     LOD, ascending, the leaves last.
 #'   - `tile_size`: the most rows in a tile.
+#'   - `row_group_size`: in a file whose row groups hold several tiles
+#'     (format version 4), the most rows in a row group; `NA` where each
+#'     row group is one tile. `row_groups`: the number of row groups.
 #'   - `bbox`: `c(xmin, ymin, xmax, ymax)` of the leaves.
 #'   - `columns`: a tibble of the value columns' `name`, `type`,
 #'     `reducer`, `codec` (see [a5_pyramid()]; `NA` for a column that
@@ -26,10 +29,11 @@
 #'     elements per cell of a vector column (`NA` for scalar columns).
 #'   - `levels`: a tibble of each level's `lod`, `rows` and number of
 #'     `tiles`.
-#'   - `tiles`: a tibble with one row per tile, which is one row group of
-#'     the file: `tile` (its 0-based index, the row group's index as Parquet
-#'     readers count), `lod`, `rows`, `bytes` (compressed size, what a
-#'     reader fetches) and `xmin`, `ymin`, `xmax`, `ymax`.
+#'   - `tiles`: a tibble with one row per tile: `tile` (its 0-based index),
+#'     `row_group` (the 0-based index of its row group, as Parquet readers
+#'     count), `lod`, `rows`, `bytes` (compressed size, what a reader
+#'     fetches: the row group, or the tile's data pages in a row group of
+#'     several tiles) and `xmin`, `ymin`, `xmax`, `ymax`.
 #'   - `metadata`: the file's other key-value metadata, a named character
 #'     vector.
 #'   - `shard`: for a shard of a pyramid set (format version 2, written by
@@ -67,6 +71,8 @@ a5_pyramid_info <- function(src) {
       data_resolution = r$data_resolution,
       lods = r$levels$lod,
       tile_size = r$tile_size,
+      row_group_size = r$row_group_size,
+      row_groups = r$n_row_groups,
       bbox = c(xmin = bbox_lon$xmin, ymin = r$bbox[2], xmax = bbox_lon$xmax, ymax = r$bbox[4]),
       columns = tibble::new_tibble(r$columns, nrow = length(r$columns$name)),
       levels = tibble::tibble(
@@ -76,6 +82,7 @@ a5_pyramid_info <- function(src) {
       ),
       tiles = tibble::tibble(
         tile = seq_along(tiles$lod) - 1L,
+        row_group = tiles$row_group,
         lod = tiles$lod,
         rows = tiles$rows,
         bytes = tiles$bytes,
@@ -121,7 +128,14 @@ print.a5pyramid_info <- function(x, ...) {
     },
     "LODs" = lods,
     "Rows" = format(sum(x$levels$rows), big.mark = ","),
-    "Tiles" = paste0(format(nrow(x$tiles), big.mark = ","), " row groups (tile size ", x$tile_size, ")"),
+    "Tiles" = if (is.na(x$row_group_size)) {
+      paste0(format(nrow(x$tiles), big.mark = ","), " row groups (tile size ", x$tile_size, ")")
+    } else {
+      paste0(
+        format(nrow(x$tiles), big.mark = ","), " in ", format(x$row_groups, big.mark = ","),
+        " row groups (tile size ", x$tile_size, ", row groups up to ", format(x$row_group_size, big.mark = ","), " rows)"
+      )
+    },
     "Columns" = cols,
     "Bbox" = paste(b, collapse = ", "),
     "Written by" = paste0(x$generator, ", a5 crate ", x$a5_crate)
@@ -139,7 +153,7 @@ format_bytes <- function(b) {
 #'
 #' Reads the rows of the tiles at `lod` whose bounding boxes meet `bbox`,
 #' as a renderer does for a view: the footer first, then only those tiles'
-#' row groups. Selection is by tile, so rows of a selected tile that lie
+#' row groups, or their data pages where row groups hold several tiles. Selection is by tile, so rows of a selected tile that lie
 #' outside `bbox` are returned too; filter the cells afterwards for an
 #' exact cut.
 #'

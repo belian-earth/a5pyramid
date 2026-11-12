@@ -14,7 +14,8 @@ a5_pyramid_set_tiers(data_resolution, lods = NULL)
 }
 \value{
 A data frame with one row per tier, in ascending LOD order:
-\code{lod_min}, \code{lod_max}, \code{shard_resolution} and \code{tile_size}.
+\code{lod_min}, \code{lod_max}, \code{shard_resolution}, \code{tile_size} and
+\code{row_group_size} (\code{NA}: one tile a row group).
 }
 \description{
 The tiers \code{\link[=a5_write_pyramid_set]{a5_write_pyramid_set()}} uses when none are given: from the

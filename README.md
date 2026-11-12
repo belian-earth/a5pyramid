@@ -120,6 +120,10 @@ A5 ids follow a space-filling curve, so a run is a compact patch of the
 globe. Levels are split down the A5 hierarchy only where a run holds
 more cells than fit a tile, so tiles are coarse where data is sparse and
 fine where it is dense, and every level stays sorted by cell id.
+With `row_group_size`, a row group holds several tiles, each one data page
+located through the Parquet page index, so an engine that scans whole row
+groups, such as DuckDB over S3, makes fewer requests while a browser still
+reads one tile at a time (format version 4).
 
 **Index.** The file’s key-value metadata holds a JSON index of the
 levels, the value columns, and the bounding box of every tile, computed

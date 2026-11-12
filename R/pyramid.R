@@ -206,6 +206,14 @@ a5_pyramid <- function(x,
 #' is sparse and fine where it is dense, and keeps every level sorted by
 #' cell id.
 #'
+#' With `row_group_size`, each level is split down the hierarchy into row
+#' groups of at most `row_group_size` rows instead, and each row group into
+#' tiles of `tile_size` rows (the last shorter), each one data page of
+#' every column. Engines that read whole row groups, such as DuckDB over
+#' S3, then make fewer requests, while a browser still reads one tile at a
+#' time: the file carries the Parquet page index, which locates each tile's
+#' pages. Such a file is in format version 4.
+#'
 #' The file's key-value metadata holds a JSON index under `"a5pyramid"`:
 #' the leaves' resolution, the value columns with their types and reducers,
 #' each level's LOD, row count and tiles, and the bounding box of each tile,
@@ -226,9 +234,12 @@ a5_pyramid <- function(x,
 #' @param dest Path of the Parquet file to write. An existing file is
 #'   replaced. The file is written under a temporary name and renamed when
 #'   complete, so a failed or interrupted write leaves no partial file.
-#' @param tile_size The most rows in a tile (row group). Larger tiles mean
-#'   fewer requests and a smaller footer; smaller tiles mean less data
-#'   fetched outside the view. Default: 4096.
+#' @param tile_size The most rows in a tile. Larger tiles mean fewer
+#'   requests and a smaller footer; smaller tiles mean less data fetched
+#'   outside the view. Default: 4096.
+#' @param row_group_size `NULL` (default) for one tile a row group, or the
+#'   most rows in a row group of several tiles, at least `tile_size` (see
+#'   "File layout"). The embeddings store uses 131072 with tiles of 16384.
 #' @param compression `"snappy"` (default), `"zstd"` or `"none"`. hyparquet
 #'   decodes snappy itself; zstd needs the `hyparquet-compressors` package
 #'   in the browser.
@@ -260,6 +271,7 @@ a5_write_pyramid <- function(x,
                              rep_sd = NULL,
                              codecs = NULL,
                              tile_size = 4096L,
+                             row_group_size = NULL,
                              compression = c("snappy", "zstd", "none"),
                              metadata = NULL,
                              threads = NULL) {
@@ -271,6 +283,7 @@ a5_write_pyramid <- function(x,
   aggregate <- rlang::arg_match(aggregate)
   compression <- rlang::arg_match(compression)
   tile_size <- check_count(tile_size)
+  row_group_size <- check_row_group_size(row_group_size, tile_size)
   meta <- check_metadata(metadata)
   threads <- resolve_threads(threads)
   input <- pyramid_input(x, rlang::enquos(...), lods, aggregate, reducers, weights, types, rep_sd, codecs)
@@ -279,6 +292,7 @@ a5_write_pyramid <- function(x,
     lods = input$lods,
     dest = path.expand(dest),
     tile_size = tile_size,
+    row_group_size = row_group_size,
     compression = compression,
     meta_keys = meta$keys,
     meta_values = meta$values,
@@ -297,12 +311,12 @@ a5_write_pyramid <- function(x,
 #' tiles to a browser itself, or to hand the pyramid to other Arrow tools.
 #'
 #' Each record batch of the table is one tile, in the order of the file's
-#' row groups: `arrow::as_record_batch_reader(tbl)$batches()[[i]]` holds the
+#' tiles: `arrow::as_record_batch_reader(tbl)$batches()[[i]]` holds the
 #' rows of row group `i - 1` of the same pyramid written with
-#' [a5_write_pyramid()], and the table's
+#' [a5_write_pyramid()] (one tile a row group), and the table's
 #' schema metadata holds the same entries as the file's key-value
 #' metadata: the index under `"a5pyramid"`, whose `tiles` and `tile_bbox`
-#' count record batches here as they count row groups in the file, the A5
+#' count record batches here as they count tiles in the file, the A5
 #' index version under
 #' `"a5_index"`, and `metadata`. The columns and their types are those of
 #' the file (see [a5_write_pyramid()]); [a5R::a5_from_arrow_table()]

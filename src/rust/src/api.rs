@@ -564,6 +564,7 @@ fn a5pyramid_write_rs(
     lods: Vec<i32>,
     dest: String,
     tile_size: i32,
+    row_group_size: i32,
     compression: String,
     meta_keys: Vec<String>,
     meta_values: Vec<String>,
@@ -571,7 +572,8 @@ fn a5pyramid_write_rs(
     threads: i32,
 ) -> Result<Robj> {
     let leaves = take_leaves(&leaves)?;
-    let tile_opts = tile_options(tile_size, generator, meta_keys, meta_values);
+    let mut tile_opts = tile_options(tile_size, generator, meta_keys, meta_values);
+    tile_opts.row_group_size = row_group_size_from_r(row_group_size);
     let pq_opts = ParquetOptions {
         compression: Compression::parse(&compression).map_err(r_error)?,
     };
@@ -582,14 +584,21 @@ fn a5pyramid_write_rs(
     Ok(list!(
         rows = summary.rows as f64,
         bytes = summary.bytes as f64,
-        tiles = summary.row_groups as i32
+        tiles = summary.tiles as i32,
+        row_groups = summary.row_groups as i32
     )
     .into())
+}
+
+/// A row group size from R: 0 for one tile a row group.
+fn row_group_size_from_r(size: i32) -> Option<usize> {
+    (size > 0).then_some(size as usize)
 }
 
 fn tile_options(tile_size: i32, generator: String, keys: Vec<String>, values: Vec<String>) -> TileOptions {
     TileOptions {
         tile_size: tile_size.max(0) as usize,
+        row_group_size: None,
         generator,
         metadata: keys.into_iter().zip(values).collect(),
         shard: None,
@@ -597,9 +606,15 @@ fn tile_options(tile_size: i32, generator: String, keys: Vec<String>, values: Ve
 }
 
 /// Tiers from R's columns, one tier per element.
-fn tiers_from_r(lod_min: &[i32], lod_max: &[i32], shard: &[i32], tile_size: &[i32]) -> Result<Vec<Tier>> {
+fn tiers_from_r(
+    lod_min: &[i32],
+    lod_max: &[i32],
+    shard: &[i32],
+    tile_size: &[i32],
+    row_group_size: &[i32],
+) -> Result<Vec<Tier>> {
     let n = lod_min.len();
-    if lod_max.len() != n || shard.len() != n || tile_size.len() != n {
+    if lod_max.len() != n || shard.len() != n || tile_size.len() != n || row_group_size.len() != n {
         return Err(other("internal error: tier columns differ in length"));
     }
     Ok((0..n)
@@ -607,6 +622,7 @@ fn tiers_from_r(lod_min: &[i32], lod_max: &[i32], shard: &[i32], tile_size: &[i3
             lods: [lod_min[k], lod_max[k]],
             shard_resolution: shard[k],
             tile_size: tile_size[k].max(0) as usize,
+            row_group_size: row_group_size_from_r(row_group_size[k]),
         })
         .collect())
 }
@@ -616,7 +632,11 @@ fn tiers_to_r(tiers: &[Tier]) -> Robj {
         lod_min = tiers.iter().map(|t| t.lods[0]).collect::<Vec<_>>(),
         lod_max = tiers.iter().map(|t| t.lods[1]).collect::<Vec<_>>(),
         shard_resolution = tiers.iter().map(|t| t.shard_resolution).collect::<Vec<_>>(),
-        tile_size = tiers.iter().map(|t| t.tile_size as i32).collect::<Vec<_>>()
+        tile_size = tiers.iter().map(|t| t.tile_size as i32).collect::<Vec<_>>(),
+        row_group_size = tiers
+            .iter()
+            .map(|t| t.row_group_size.map_or(Rint::na(), |s| Rint::from(s as i32)))
+            .collect::<Vec<Rint>>()
     )
     .into()
 }
@@ -715,6 +735,7 @@ fn a5pyramid_write_set_rs(
     tier_lod_max: Vec<i32>,
     tier_shard_resolution: Vec<i32>,
     tier_tile_size: Vec<i32>,
+    tier_row_group_size: Vec<i32>,
     compression: String,
     meta_keys: Vec<String>,
     meta_values: Vec<String>,
@@ -723,7 +744,13 @@ fn a5pyramid_write_set_rs(
 ) -> Result<Robj> {
     let leaves = take_leaves(&leaves)?;
     let opts = SetOptions {
-        tiers: tiers_from_r(&tier_lod_min, &tier_lod_max, &tier_shard_resolution, &tier_tile_size)?,
+        tiers: tiers_from_r(
+            &tier_lod_min,
+            &tier_lod_max,
+            &tier_shard_resolution,
+            &tier_tile_size,
+            &tier_row_group_size,
+        )?,
         generator,
         metadata: meta_keys.into_iter().zip(meta_values).collect(),
         parquet: ParquetOptions {
@@ -793,7 +820,7 @@ fn a5pyramid_arrow_rs(
 fn a5pyramid_info_rs(src: String) -> Result<Robj> {
     let f = PyramidFile::open(&src).map_err(r_error)?;
     let m = &f.meta;
-    let n_tiles = f.n_row_groups();
+    let n_tiles = f.n_tiles();
     let tile_lod: Vec<i32> = (0..n_tiles).map(|i| m.level_of(i).map_or(-1, |l| l.lod)).collect();
     let tile_box: Vec<[f64; 4]> = (0..n_tiles).map(|i| m.tile_bbox(i).to_array()).collect();
     let side = |k: usize| tile_box.iter().map(|b| b[k]).collect::<Vec<f64>>();
@@ -808,6 +835,8 @@ fn a5pyramid_info_rs(src: String) -> Result<Robj> {
             .map_or_else(|| Robj::from(Strings::from(Rstr::na())), Robj::from),
         data_resolution = m.data_resolution,
         tile_size = m.tile_size as f64,
+        row_group_size = m.row_group_size.map_or(f64::na(), |s| s as f64),
+        n_row_groups = f.n_row_groups() as i32,
         bbox = m.bbox.to_vec(),
         columns = List::from_pairs(vec![
             (
@@ -858,8 +887,9 @@ fn a5pyramid_info_rs(src: String) -> Result<Robj> {
         ),
         tiles = list!(
             lod = tile_lod,
-            rows = as_f64(f.row_group_rows()),
-            bytes = as_f64(f.row_group_bytes()),
+            row_group = f.tiles().iter().map(|t| t.row_group as i32).collect::<Vec<_>>(),
+            rows = as_f64(f.tiles().iter().map(|t| t.rows).collect()),
+            bytes = as_f64(f.tile_bytes()),
             west = side(0),
             south = side(1),
             east = side(2),
@@ -879,8 +909,8 @@ fn a5pyramid_info_rs(src: String) -> Result<Robj> {
     .into())
 }
 
-/// Rows of the row groups at `lods` (NULL for all) meeting `bbox` (empty for
-/// everywhere), with the indices of the row groups read.
+/// Rows of the tiles at `lods` (NULL for all) meeting `bbox` (empty for
+/// everywhere).
 /// @noRd
 /// @keywords internal
 #[extendr]
@@ -899,8 +929,8 @@ fn a5pyramid_read_rs(src: String, lods: Robj, bbox: Vec<f64>) -> Result<Robj> {
         4 => Some(Bbox::from_array([bbox[0], bbox[1], bbox[2], bbox[3]]).map_err(r_error)?),
         _ => return Err(other("internal error: bbox must have 4 values")),
     };
-    let rgs = f.select(lods.as_deref(), bbox.as_ref()).map_err(r_error)?;
-    let batches = f.read(&rgs).map_err(r_error)?;
+    let tiles = f.select(lods.as_deref(), bbox.as_ref()).map_err(r_error)?;
+    let batches = f.read(&tiles).map_err(r_error)?;
     let names: Vec<String> = f.meta.columns.iter().map(|c| c.name.clone()).collect();
     let cells: Vec<u64> = batches
         .iter()

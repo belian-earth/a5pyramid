@@ -8,8 +8,8 @@ hyparquet_path <- function() {
   path
 }
 
-read_hyparquet <- function(path, rg) {
-  script <- test_path("js", "read-hyparquet.mjs")
+read_hyparquet <- function(path, rg, script = "read-hyparquet.mjs") {
+  script <- test_path("js", script)
   # an .mjs copy loads as an ES module on every Node version; Node 18 does
   # not detect module syntax in a .js file
   lib <- withr::local_tempfile(fileext = ".mjs")
@@ -93,4 +93,34 @@ test_that("hyparquet reads a vector column as one byte array a row", {
   expect_identical(js$vector_class$emb, "Uint8Array")
   expect_identical(js$cells, hex(want$cell))
   expect_identical(unname(js$vectors$emb), unname(want$emb))
+})
+
+test_that("hyparquet reads a tile of a row group of several tiles by its pages", {
+  hyparquet_path()
+  skip_if_not_installed("jsonlite")
+  x <- make_leaves()
+  x$value[5] <- NA
+  path <- tmp_parquet()
+  a5_write_pyramid(x, path, value, count, types = c(value = "float32", count = "uint8"),
+                   tile_size = 100, row_group_size = 800)
+  info <- a5_pyramid_info(path)
+  rows <- a5_read_pyramid(path)
+  starts <- cumsum(c(0, info$tiles$rows))
+  # the third tile of a leaf row group of eight
+  leaf <- info$tiles[info$tiles$lod == 15L, ]
+  g <- as.integer(names(which(table(leaf$row_group) == 8L))[1])
+  tile <- leaf$tile[leaf$row_group == g][3]
+  js <- read_hyparquet(path, tile, "read-hyparquet-tile.mjs")
+  want <- rows[(starts[tile + 1] + 1):starts[tile + 2], ]
+  expect_identical(js$format_version, 4L)
+  expect_identical(js$n_tiles, nrow(info$tiles))
+  expect_identical(js$n_row_groups, info$row_groups)
+  expect_identical(c(js$row_group, js$page), c(g, 2L))
+  expect_identical(js$cells, hex(want$cell))
+  expect_identical(js$lod, want$lod)
+  expect_identical(js$ncell, want$ncell)
+  expect_equal(js$columns$value, want$value)
+  expect_identical(as.integer(js$columns$count), want$count)
+  # its pages, the offset index and the lod dictionary, not the row group
+  expect_lt(js$fetched_bytes, js$row_group_bytes / 2)
 })

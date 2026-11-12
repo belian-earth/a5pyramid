@@ -149,3 +149,49 @@ test_that("Arrow reads the file with its types and index", {
   tbl <- reader$ReadTable()
   expect_identical(hex(a5R::a5_cell_from_arrow(tbl$cell)), hex(a5_read_pyramid(path)$cell))
 })
+
+test_that("row groups of several tiles read back as built, a tile a page", {
+  x <- make_leaves()
+  path <- tmp_parquet()
+  types <- c(value = "float32", count = "uint8")
+  a5_write_pyramid(x, path, types = types, tile_size = 100, row_group_size = 400)
+  built <- a5_pyramid(x, types = types)
+  back <- a5_read_pyramid(path)
+  expect_identical(hex(back$cell), hex(built$cell))
+  expect_identical(back[-1], built[-1])
+
+  info <- a5_pyramid_info(path)
+  expect_identical(info$format_version, 4L)
+  expect_identical(info$row_group_size, 400)
+  expect_lt(info$row_groups, nrow(info$tiles))
+  tiles <- info$tiles
+  expect_false(is.unsorted(tiles$row_group))
+  for (g in unique(tiles$row_group)) {
+    t <- tiles[tiles$row_group == g, ]
+    expect_lte(sum(t$rows), 400)
+    expect_true(all(t$rows[-nrow(t)] == 100))
+    expect_length(unique(t$lod), 1L)
+  }
+  expect_match(cli::cli_fmt(print(info)), "row groups up to 400 rows", all = FALSE)
+  # one level, by tile: a tile's bytes are its pages', not its row group's
+  leaf <- a5_read_pyramid(path, lod = 15)
+  expect_identical(hex(leaf$cell), hex(level(built, 15)$cell))
+  big <- tiles$row_group[duplicated(tiles$row_group)][1]
+  expect_lt(max(tiles$bytes[tiles$row_group == big]), sum(tiles$bytes[tiles$row_group == big]) / 2)
+
+  expect_error(a5_write_pyramid(x, path, tile_size = 100, row_group_size = 99), class = "a5pyramid_error_input")
+  expect_error(a5_write_pyramid(x, path, row_group_size = NA), class = "a5pyramid_error_input")
+})
+
+test_that("Arrow reads row groups of several tiles whole", {
+  skip_if_not_installed("arrow")
+  x <- make_leaves()
+  path <- tmp_parquet()
+  a5_write_pyramid(x, path, value, tile_size = 100, row_group_size = 400)
+  info <- a5_pyramid_info(path)
+  reader <- arrow::ParquetFileReader$create(path)
+  expect_identical(reader$num_row_groups, info$row_groups)
+  expect_match(reader$GetSchema()$metadata$a5pyramid, '"row_group_size":400')
+  tbl <- reader$ReadTable()
+  expect_identical(hex(a5R::a5_cell_from_arrow(tbl$cell)), hex(a5_read_pyramid(path)$cell))
+})

@@ -45,7 +45,7 @@ with no R dependency, in `src/rust/a5pyramid`, to be published on its own.
 | Reduce | mean, sum, min, max, mode, or a representative leaf that keeps real combinations of values such as colours; a mean of codes, such as AEF embeddings, is taken on the values they decode to |
 | Read | `a5_pyramid_info()` reads the index from the footer; `a5_read_pyramid()` reads levels within a bounding box, as a renderer does |
 | Sets | `a5_write_pyramid_set()` splits a pyramid too large for one file into shards, each a small file around one coarse cell, with an index, `set.json`, so a browser opens only the shards in view |
-| Format | One tile per Parquet row group (or Arrow record batch), with each tile's level and bounding box indexed in the metadata; specified in [`FORMAT.md`](src/rust/a5pyramid/FORMAT.md) |
+| Format | One tile per Parquet row group or data page (or Arrow record batch), with each tile's level and bounding box indexed in the metadata; specified in [`FORMAT.md`](src/rust/a5pyramid/FORMAT.md) |
 
 ## Installation
 
@@ -116,6 +116,10 @@ follow a space-filling curve, so a run is a compact patch of the globe.
 Levels are split down the A5 hierarchy only where a run holds more cells than
 fit a tile, so tiles are coarse where data is sparse and fine where it is
 dense, and every level stays sorted by cell id.
+With `row_group_size`, a row group holds several tiles, each one data page
+located through the Parquet page index, so an engine that scans whole row
+groups, such as DuckDB over S3, makes fewer requests while a browser still
+reads one tile at a time (format version 4).
 
 **Index.** The file's key-value metadata holds a JSON index of the levels,
 the value columns, and the bounding box of every tile, computed from

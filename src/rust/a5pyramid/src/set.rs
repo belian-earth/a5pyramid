@@ -39,13 +39,16 @@ pub const SET_FORMAT: &str = "a5pyramid-set";
 pub const DEFAULT_SET_TILE_SIZE: usize = 16384;
 
 /// One tier of a set: the LODs it holds (`lods[0]` to `lods[1]`,
-/// inclusive), the resolution of the cells that key its shards, and the
-/// most rows in each of its tiles.
+/// inclusive), the resolution of the cells that key its shards, the most
+/// rows in each of its tiles, and optionally the most rows in a row group
+/// of several tiles ([`TileOptions::row_group_size`]).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Tier {
     pub lods: [i32; 2],
     pub shard_resolution: i32,
     pub tile_size: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_group_size: Option<usize>,
 }
 
 impl Tier {
@@ -80,6 +83,7 @@ pub fn default_tiers(data_resolution: i32, lods: &[i32]) -> Vec<Tier> {
             lods: [hi - 2, hi],
             shard_resolution: hi - 12,
             tile_size: DEFAULT_SET_TILE_SIZE,
+            row_group_size: None,
         });
         hi -= 3;
     }
@@ -88,6 +92,7 @@ pub fn default_tiers(data_resolution: i32, lods: &[i32]) -> Vec<Tier> {
             lods: [low, hi],
             shard_resolution: (hi - 12).max(0).min(low),
             tile_size: DEFAULT_SET_TILE_SIZE,
+            row_group_size: None,
         });
     }
     tiers.reverse();
@@ -288,6 +293,8 @@ fn write_shards(
     let mut levels: Vec<Option<Level>> = levels.into_iter().map(Some).collect();
     let dims: Vec<usize> = vectors.iter().map(|v| v.dim).collect();
     let mut shards = Vec::new();
+    // whether any shard has a row group of several tiles (version 4)
+    let mut several = false;
     for (t, tier) in tiers.iter().enumerate() {
         cancel.check()?;
         let tier_levels: Vec<Level> = levels
@@ -325,6 +332,7 @@ fn write_shards(
             let path = dir.join(&rel);
             let tile_opts = TileOptions {
                 tile_size: tier.tile_size,
+                row_group_size: tier.row_group_size,
                 generator: opts.generator.clone(),
                 metadata: opts.metadata.clone(),
                 shard: Some(shard.clone()),
@@ -336,6 +344,7 @@ fn write_shards(
                 levels: shard_levels,
             };
             let tiled = TiledPyramid::new(shard_pyramid, &tile_opts, cancel)?;
+            several |= tiled.meta().row_group_size.is_some();
             // write_parquet removes its own partial file on failure
             let summary = write_parquet(&tiled, &path, &opts.parquet, cancel)?;
             written.files.push(path.clone());
@@ -344,7 +353,7 @@ fn write_shards(
                 cell: shard.cell,
                 path: rel,
                 rows: summary.rows,
-                tiles: summary.row_groups,
+                tiles: summary.tiles,
                 bytes: summary.bytes,
                 footer_bytes: PyramidFile::open(&path)?.footer_bytes(),
                 bbox: tiled.meta().bbox,
@@ -367,7 +376,7 @@ fn write_shards(
         .collect();
     let meta = SetMeta {
         format: SET_FORMAT.to_string(),
-        format_version: version_with(&vectors, SHARD_FILE_VERSION),
+        format_version: version_with(&vectors, several, SHARD_FILE_VERSION),
         generator: opts.generator.clone(),
         a5_crate: crate::A5_CRATE_VERSION.to_string(),
         a5_index: A5_INDEX.to_string(),
@@ -416,6 +425,12 @@ fn check_tiers(tiers: &[Tier], lods: &[i32]) -> Result<Vec<Tier>> {
         if t.tile_size == 0 {
             return Err(invalid(format!(
                 "the tier of LODs {lo} to {hi} has tile size 0; tiles need room for at least one row"
+            )));
+        }
+        if let Some(size) = t.row_group_size.filter(|&s| s < t.tile_size) {
+            return Err(invalid(format!(
+                "the tier of LODs {lo} to {hi} has row group size {size}, below its tile size {}",
+                t.tile_size
             )));
         }
     }
@@ -602,16 +617,19 @@ mod tests {
                 lods: [2, 6],
                 shard_resolution: 0,
                 tile_size: 50,
+                row_group_size: None,
             },
             Tier {
                 lods: [7, 9],
                 shard_resolution: 4,
                 tile_size: 200,
+                row_group_size: None,
             },
             Tier {
                 lods: [10, 12],
                 shard_resolution: 7,
                 tile_size: 500,
+                row_group_size: None,
             },
         ]
     }
@@ -761,44 +779,58 @@ mod tests {
                 lods: [2, 12],
                 shard_resolution: 3,
                 tile_size: 10,
+                row_group_size: None,
             }],
             vec![Tier {
                 lods: [2, 12],
                 shard_resolution: 0,
                 tile_size: 0,
+                row_group_size: None,
             }],
             vec![Tier {
                 lods: [5, 2],
                 shard_resolution: 0,
                 tile_size: 10,
+                row_group_size: None,
+            }],
+            vec![Tier {
+                lods: [2, 12],
+                shard_resolution: 0,
+                tile_size: 10,
+                row_group_size: Some(9),
             }],
             vec![
                 Tier {
                     lods: [2, 8],
                     shard_resolution: 0,
                     tile_size: 10,
+                    row_group_size: None,
                 },
                 Tier {
                     lods: [8, 12],
                     shard_resolution: 6,
                     tile_size: 10,
+                    row_group_size: None,
                 },
             ],
             vec![Tier {
                 lods: [3, 12],
                 shard_resolution: 0,
                 tile_size: 10,
+                row_group_size: None,
             }],
             vec![
                 Tier {
                     lods: [0, 1],
                     shard_resolution: 0,
                     tile_size: 10,
+                    row_group_size: None,
                 },
                 Tier {
                     lods: [2, 12],
                     shard_resolution: 0,
                     tile_size: 10,
+                    row_group_size: None,
                 },
             ],
         ];
@@ -875,7 +907,7 @@ mod tests {
         for s in &meta.shards {
             let f = PyramidFile::open(dir.join(&s.path)).unwrap();
             assert_eq!(f.meta.format_version, 3);
-            for b in f.read(&(0..f.n_row_groups()).collect::<Vec<_>>()).unwrap() {
+            for b in f.read(&(0..f.n_tiles()).collect::<Vec<_>>()).unwrap() {
                 let cells = b.column(0).as_primitive::<arrow_array::types::UInt64Type>();
                 let e = b.column_by_name("e").unwrap().as_fixed_size_binary();
                 for i in 0..b.num_rows() {
@@ -891,6 +923,38 @@ mod tests {
         got.sort();
         want.sort();
         assert_eq!(got, want);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tiers_with_row_groups_of_tiles_make_a_version_4_set() {
+        let mut t = tiers();
+        for tier in &mut t {
+            tier.row_group_size = Some(3 * tier.tile_size);
+        }
+        let whole = pyramid();
+        let dir = tempdir("row-groups");
+        let meta = write_set(whole.clone(), &dir, &opts(t.clone()), &Cancel::new()).unwrap();
+        assert_eq!(meta.format_version, 4);
+        assert_eq!(meta.tiers, t);
+        let back = SetMeta::read(&dir).unwrap();
+        assert_eq!(back.tiers, t);
+        let mut several = 0;
+        let mut rows = 0;
+        for s in &meta.shards {
+            let f = PyramidFile::open(dir.join(&s.path)).unwrap();
+            assert_eq!(s.tiles, f.n_tiles());
+            if f.n_tiles() > f.n_row_groups() {
+                several += 1;
+                assert_eq!(f.meta.format_version, 4);
+                assert_eq!(f.meta.row_group_size, Some(3 * f.meta.tile_size));
+            }
+            let batches = f.read(&(0..f.n_tiles()).collect::<Vec<_>>()).unwrap();
+            assert_eq!(batches.len(), f.n_tiles());
+            rows += batches.iter().map(|b| b.num_rows()).sum::<usize>();
+        }
+        assert!(several > 0);
+        assert_eq!(rows, whole.n_rows());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

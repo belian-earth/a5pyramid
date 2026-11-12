@@ -46,9 +46,11 @@ resolution from 2 up to the leaves'.}
 
 \item{tiers}{A data frame with one row per tier and columns \code{lod_min} and
 \code{lod_max} (the tier's LODs, inclusive), \code{shard_resolution} (from 0 up
-to \code{lod_min}) and optionally \code{tile_size} (default 16384). Between them
-the tiers must hold every level, the leaves included, and each must
-hold at least one. Default: \code{\link[=a5_pyramid_set_tiers]{a5_pyramid_set_tiers()}}.}
+to \code{lod_min}), and optionally \code{tile_size} (default 16384) and
+\code{row_group_size} (default \code{NA}, one tile a row group; see
+\code{\link[=a5_write_pyramid]{a5_write_pyramid()}}). Between them the tiers must hold every level,
+the leaves included, and each must hold at least one. Default:
+\code{\link[=a5_pyramid_set_tiers]{a5_pyramid_set_tiers()}}.}
 
 \item{aggregate}{The reducer for every value column: \code{"mean"} (default)
 or \code{"rep_child"}. See "Reducers".}

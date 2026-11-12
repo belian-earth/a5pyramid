@@ -45,9 +45,11 @@
 #'   resolution from 2 up to the leaves'.
 #' @param tiers A data frame with one row per tier and columns `lod_min` and
 #'   `lod_max` (the tier's LODs, inclusive), `shard_resolution` (from 0 up
-#'   to `lod_min`) and optionally `tile_size` (default 16384). Between them
-#'   the tiers must hold every level, the leaves included, and each must
-#'   hold at least one. Default: [a5_pyramid_set_tiers()].
+#'   to `lod_min`), and optionally `tile_size` (default 16384) and
+#'   `row_group_size` (default `NA`, one tile a row group; see
+#'   [a5_write_pyramid()]). Between them the tiers must hold every level,
+#'   the leaves included, and each must hold at least one. Default:
+#'   [a5_pyramid_set_tiers()].
 #' @returns `dest`, invisibly.
 #' @seealso [a5_pyramid_set_info()] to read the index, [a5_write_pyramid()]
 #'   for a single file.
@@ -111,6 +113,7 @@ a5_write_pyramid_set <- function(x,
     tier_lod_max = tiers$lod_max,
     tier_shard_resolution = tiers$shard_resolution,
     tier_tile_size = tiers$tile_size,
+    tier_row_group_size = ifelse(is.na(tiers$row_group_size), 0L, tiers$row_group_size),
     compression = compression,
     meta_keys = meta$keys,
     meta_values = meta$values,
@@ -133,7 +136,8 @@ a5_write_pyramid_set <- function(x,
 #' @param lods The coarser LODs. Default: every resolution from 2 up to
 #'   `data_resolution`.
 #' @returns A data frame with one row per tier, in ascending LOD order:
-#'   `lod_min`, `lod_max`, `shard_resolution` and `tile_size`.
+#'   `lod_min`, `lod_max`, `shard_resolution`, `tile_size` and
+#'   `row_group_size` (`NA`: one tile a row group).
 #' @export
 #' @examples
 #' a5_pyramid_set_tiers(18)
@@ -167,8 +171,8 @@ a5_pyramid_set_tiers <- function(data_resolution, lods = NULL) {
 #'     undefined; `NA` for other reducers and older files), and `dim`, the
 #'     elements per cell of a vector column (`NA` for scalar columns).
 #'   - `tiers`: a tibble with one row per tier: `tier` (from 0), `lod_min`,
-#'     `lod_max`, `shard_resolution`, `tile_size`, and its `shards`, `rows`
-#'     and `bytes`.
+#'     `lod_max`, `shard_resolution`, `tile_size`, `row_group_size` (`NA`
+#'     for one tile a row group), and its `shards`, `rows` and `bytes`.
 #'   - `shards`: a tibble with one row per shard: `tier`, `cell` (the shard
 #'     cell, an [a5R::a5_cell]), `path` (relative to the set's directory),
 #'     `rows`, `tiles`, `bytes`, `footer_bytes` (what a reader fetches to
@@ -216,6 +220,7 @@ a5_pyramid_set_info <- function(src) {
     lod_max = t$lod_max,
     shard_resolution = t$shard_resolution,
     tile_size = t$tile_size,
+    row_group_size = t$row_group_size,
     shards = as.integer(per_tier(rep(1, length(s$tier)))),
     rows = per_tier(s$rows),
     bytes = per_tier(s$bytes)
@@ -274,8 +279,9 @@ print.a5pyramid_set_info <- function(x, ...) {
 }
 
 #' Validate `tiers` for a5_write_pyramid_set(): NULL, or a data frame with
-#' whole-number lod_min, lod_max and shard_resolution, and tile_size
-#' (default 16384). The engine checks how the tiers fit the levels.
+#' whole-number lod_min, lod_max and shard_resolution, tile_size (default
+#' 16384) and row_group_size (default NA). The engine checks how the tiers
+#' fit the levels.
 #' @noRd
 check_tiers <- function(tiers, call = rlang::caller_env()) {
   if (is.null(tiers)) {
@@ -301,6 +307,16 @@ check_tiers <- function(tiers, call = rlang::caller_env()) {
     }
     out[[nm]] <- as.integer(v)
   }
+  rgs <- tiers$row_group_size
+  if (is.null(rgs)) {
+    rgs <- rep(NA_integer_, nrow(tiers))
+  }
+  ok <- (is.logical(rgs) && all(is.na(rgs))) ||
+    (is.numeric(rgs) && all(is.na(rgs) | (rgs == trunc(rgs) & rgs >= out$tile_size & rgs <= .Machine$integer.max)))
+  if (!ok) {
+    a5pyramid_abort("input", "{.arg tiers}{.field $row_group_size} must hold {.code NA} or whole numbers of at least the tier's {.field tile_size}.", call = call)
+  }
+  out$row_group_size <- as.integer(rgs)
   out
 }
 

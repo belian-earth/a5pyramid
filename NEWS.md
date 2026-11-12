@@ -1,5 +1,25 @@
 # a5pyramid (development version)
 
+* Row groups of several tiles (format version 4): `row_group_size` in
+  `a5_write_pyramid()` and in a set's `tiers` splits each level down the
+  hierarchy into row groups of at most that many rows, and each row group
+  into tiles of `tile_size` rows, each one data page of every column chunk.
+  The file carries the Parquet page index (an offset index for every
+  column, a column index for `cell`), and the writer checks every page
+  against the tiles before the file is renamed into place. Engines that
+  read whole row groups make fewer requests: the embeddings store's
+  prototype replay over S3 ran 27 to 41% slower with 16,384-row groups than
+  with 122,880, while a browser reading 16,384-row pages of 131,072-row
+  groups fetched the same bytes as with 16,384-row groups. Without
+  `row_group_size` files are unchanged. `a5_pyramid_info()` gains
+  `row_group_size`, `row_groups` and `tiles$row_group`, and `tiles$bytes`
+  counts a tile's pages; data pages are pinned to version 1. In the crate:
+  `TileOptions::row_group_size`, `Tier::row_group_size`,
+  `PyramidMeta::row_group_size`, `PyramidMeta::locate_tiles()`,
+  `TiledPyramid::row_groups()`, `PyramidFile::tiles()`, `tile_bytes()` and
+  `parquet_metadata()`; `PyramidFile::read()` takes tiles, and
+  `WriteSummary` gains `tiles`.
+
 * Codecs: `codecs = c(embedding = "aef")` gives a `mean` column of codes
   the mean of the values they stand for. Each leaf's code is decoded, the
   (weighted) mean taken and the result encoded, so a coarse cell holds the

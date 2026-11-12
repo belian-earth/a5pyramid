@@ -41,7 +41,7 @@ a5pyramid_build_rs <- function(leaves, lods, threads) .Call(wrap__a5pyramid_buil
 #' Build a pyramid and write it to `dest`; returns a summary.
 #' @noRd
 #' @keywords internal
-a5pyramid_write_rs <- function(leaves, lods, dest, tile_size, compression, meta_keys, meta_values, generator, threads) .Call(wrap__a5pyramid_write_rs, leaves, lods, dest, tile_size, compression, meta_keys, meta_values, generator, threads)
+a5pyramid_write_rs <- function(leaves, lods, dest, tile_size, row_group_size, compression, meta_keys, meta_values, generator, threads) .Call(wrap__a5pyramid_write_rs, leaves, lods, dest, tile_size, row_group_size, compression, meta_keys, meta_values, generator, threads)
 
 #' Build a pyramid, tile it, and export the tiles as an Arrow C stream:
 #' `holder` (an external pointer owning the stream until it is imported)
@@ -55,7 +55,7 @@ a5pyramid_arrow_rs <- function(leaves, lods, tile_size, meta_keys, meta_values, 
 #' the set's index.
 #' @noRd
 #' @keywords internal
-a5pyramid_write_set_rs <- function(leaves, lods, dest, tier_lod_min, tier_lod_max, tier_shard_resolution, tier_tile_size, compression, meta_keys, meta_values, generator, threads) .Call(wrap__a5pyramid_write_set_rs, leaves, lods, dest, tier_lod_min, tier_lod_max, tier_shard_resolution, tier_tile_size, compression, meta_keys, meta_values, generator, threads)
+a5pyramid_write_set_rs <- function(leaves, lods, dest, tier_lod_min, tier_lod_max, tier_shard_resolution, tier_tile_size, tier_row_group_size, compression, meta_keys, meta_values, generator, threads) .Call(wrap__a5pyramid_write_set_rs, leaves, lods, dest, tier_lod_min, tier_lod_max, tier_shard_resolution, tier_tile_size, tier_row_group_size, compression, meta_keys, meta_values, generator, threads)
 
 #' The default tiers of a set with leaves at `data_resolution` and levels
 #' at `lods`.
@@ -73,8 +73,8 @@ a5pyramid_set_info_rs <- function(src) .Call(wrap__a5pyramid_set_info_rs, src)
 #' @keywords internal
 a5pyramid_info_rs <- function(src) .Call(wrap__a5pyramid_info_rs, src)
 
-#' Rows of the row groups at `lods` (NULL for all) meeting `bbox` (empty for
-#' everywhere), with the indices of the row groups read.
+#' Rows of the tiles at `lods` (NULL for all) meeting `bbox` (empty for
+#' everywhere).
 #' @noRd
 #' @keywords internal
 a5pyramid_read_rs <- function(src, lods, bbox) .Call(wrap__a5pyramid_read_rs, src, lods, bbox)
